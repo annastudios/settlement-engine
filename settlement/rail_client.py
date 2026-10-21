@@ -47,3 +47,17 @@ def send_to_rail(payment: Payment) -> None:
     answer = response.json()
     if answer["status"] == "rejected":
         raise RailRejected(answer["reason"])
+
+
+def get_chaos() -> dict:
+    """The rail simulator's current chaos settings (for the dashboard)."""
+    response = _client.get("/chaos")
+    response.raise_for_status()
+    return response.json()
+
+
+def set_chaos(settings: dict) -> dict:
+    """Change the rail simulator's chaos settings (for the dashboard)."""
+    response = _client.put("/chaos", json=settings)
+    response.raise_for_status()
+    return response.json()

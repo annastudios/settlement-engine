@@ -38,6 +38,29 @@ uvicorn settlement.main:app --reload   # the API: http://localhost:8000/docs
 python -m settlement.worker            # a worker; run several for more
 ```
 
+Then open the **live dashboard** at http://localhost:8000/dashboard.
+
+## Live dashboard
+
+`/dashboard` refreshes every second and shows:
+
+- How many payments are in each state
+- What Redis holds right now: waiting in the queue, being worked on (which
+  worker holds which payment, and how long its lease has left), waiting to
+  retry
+- The repair queue, with a **Resubmit** button per payment
+- Recent payments, each row flashing when its status changes
+
+Buttons send batches of random FPS/SEPA payments (about 1 in 10 FPS ones to
+a closed account) and switch the rail simulator between **Healthy**,
+**Flaky** (30% of sends fail), **Down** and **Loses answers** (settles, then
+the answer is lost), so retries, the repair queue and recovery can be
+watched as they happen. Kill a worker with Ctrl+C mid-batch and start it
+again to watch crash recovery.
+
+The `/demo/...` endpoints behind those buttons are for local development
+and demos only.
+
 Tests use a separate `settlement_test` database (created automatically), so
 they never touch your dev data. Tables are created on startup; after a schema
 change, reset the dev database with `docker compose down -v`.
@@ -51,6 +74,10 @@ change, reset the dev database with `docker compose down -v`.
 | `GET /repair-queue` | Payments that ran out of attempts, oldest first. |
 | `POST /payments/{uetr}/resubmit` | Give a payment in the repair queue a fresh set of attempts. **409** if it isn't in the repair queue. |
 | `GET /health` | Postgres and Redis status; **503** if either is down. |
+| `GET /dashboard` | The live dashboard page. |
+| `GET /stats` | Everything the dashboard shows, as JSON. |
+| `POST /demo/payments?count=N` | Submit N random test payments (1-200). Dev/demo only. |
+| `PUT /demo/chaos` | Change the rail simulator's behaviour. Dev/demo only. |
 
 A payment is loosely modelled on ISO 20022 pacs.008:
 

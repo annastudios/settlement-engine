@@ -13,6 +13,12 @@ engine = create_engine(
 )
 SessionLocal = sessionmaker(engine, expire_on_commit=False)
 
+
+def get_session():
+    """FastAPI dependency: one session per request, always closed."""
+    with SessionLocal() as session:
+        yield session
+
 redis_client = redis.Redis.from_url(
     config.REDIS_URL,
     socket_connect_timeout=2,

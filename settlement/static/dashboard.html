@@ -1,0 +1,291 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Settlement Engine</title>
+<style>
+  :root {
+    --bg: #f6f7f9; --panel: #ffffff; --text: #1c2330; --muted: #6b7380; --line: #e3e6eb;
+    --received: #6b7380; --processing: #2f6fde; --retrying: #c98a06;
+    --settled: #1f9d55; --rejected: #d64545; --in_repair: #8a4fd8;
+    --flash: #fff4c2;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #12151b; --panel: #1b2029; --text: #e6e9ef; --muted: #8d95a3; --line: #2b313c;
+      --received: #8d95a3; --processing: #5b8ff0; --retrying: #e0a92a;
+      --settled: #3cc47a; --rejected: #ee6b6b; --in_repair: #a77ff0;
+      --flash: #3d3720;
+    }
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; background: var(--bg); color: var(--text);
+    font: 14px/1.45 system-ui, -apple-system, "Segoe UI", sans-serif;
+  }
+  main { max-width: 1200px; margin: 0 auto; padding: 20px 16px 40px; }
+  header { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; margin-bottom: 16px; }
+  h1 { font-size: 20px; margin: 0; }
+  h2 { font-size: 13px; text-transform: uppercase; letter-spacing: .06em; color: var(--muted); margin: 0 0 10px; }
+  .live { display: inline-flex; align-items: center; gap: 6px; color: var(--muted); font-size: 13px; }
+  .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--settled); animation: pulse 1.5s infinite; }
+  .dot.down { background: var(--rejected); animation: none; }
+  @keyframes pulse { 50% { opacity: .3; } }
+  .panel { background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 14px; }
+  .grid { display: grid; gap: 12px; }
+  .tiles { grid-template-columns: repeat(auto-fit, minmax(120px, 1fr)); margin-bottom: 12px; }
+  .tile { border-left: 4px solid var(--c); }
+  .tile .n { font-size: 26px; font-weight: 650; font-variant-numeric: tabular-nums; }
+  .tile .label { color: var(--muted); font-size: 12px; }
+  .row2 { grid-template-columns: 1fr 1fr; margin-bottom: 12px; }
+  @media (max-width: 800px) { .row2 { grid-template-columns: 1fr; } }
+  .buttons { display: flex; gap: 8px; flex-wrap: wrap; }
+  button {
+    font: inherit; padding: 7px 12px; border-radius: 7px; cursor: pointer;
+    border: 1px solid var(--line); background: var(--bg); color: var(--text);
+  }
+  button:hover { border-color: var(--muted); }
+  button.active { background: var(--text); color: var(--panel); border-color: var(--text); }
+  button.small { padding: 3px 8px; font-size: 12px; }
+  .hint { color: var(--muted); font-size: 12px; margin-top: 8px; }
+  .queue { display: flex; gap: 18px; flex-wrap: wrap; margin-bottom: 10px; }
+  .queue b { font-size: 20px; font-variant-numeric: tabular-nums; }
+  table { width: 100%; border-collapse: collapse; font-variant-numeric: tabular-nums; }
+  th { text-align: left; color: var(--muted); font-weight: 500; font-size: 12px; padding: 4px 8px; border-bottom: 1px solid var(--line); }
+  td { padding: 6px 8px; border-bottom: 1px solid var(--line); white-space: nowrap; }
+  td.wrap { white-space: normal; color: var(--muted); font-size: 12px; }
+  .table-wrap { overflow-x: auto; }
+  tr.flash td { animation: flash 1.2s ease-out; }
+  @keyframes flash { from { background: var(--flash); } to { background: transparent; } }
+  .pill {
+    display: inline-block; padding: 1px 8px; border-radius: 999px; font-size: 12px; font-weight: 600;
+    color: var(--c); border: 1px solid var(--c);
+  }
+  .mono { font-family: ui-monospace, Consolas, monospace; font-size: 12px; }
+  .empty { color: var(--muted); padding: 8px 0; }
+  .error { color: var(--rejected); }
+</style>
+</head>
+<body>
+<main>
+  <header>
+    <h1>Settlement Engine</h1>
+    <span class="live"><span class="dot" id="dot"></span><span id="live-text">live</span></span>
+  </header>
+
+  <section class="grid tiles" id="tiles"></section>
+
+  <section class="grid row2">
+    <div class="panel">
+      <h2>Send payments</h2>
+      <div class="buttons">
+        <button data-send="1">Send 1</button>
+        <button data-send="10">Send 10</button>
+        <button data-send="50">Send 50</button>
+      </div>
+      <div class="hint">Random FPS and SEPA payments. About 1 in 10 FPS payments go to a closed account, which the rail rejects (AC04).</div>
+    </div>
+    <div class="panel">
+      <h2>Rail behaviour</h2>
+      <div class="buttons" id="chaos-buttons"></div>
+      <div class="hint" id="chaos-hint"></div>
+    </div>
+  </section>
+
+  <section class="grid row2">
+    <div class="panel">
+      <h2>Redis right now</h2>
+      <div class="queue" id="queue"></div>
+      <div id="leases"></div>
+    </div>
+    <div class="panel">
+      <h2>Repair queue</h2>
+      <div id="repair"></div>
+    </div>
+  </section>
+
+  <section class="panel">
+    <h2>Recent payments</h2>
+    <div class="table-wrap">
+      <table>
+        <thead><tr><th>UETR</th><th>Rail</th><th>Amount</th><th>Status</th><th>Attempts</th><th>Updated</th><th>Detail</th></tr></thead>
+        <tbody id="recent"></tbody>
+      </table>
+    </div>
+  </section>
+</main>
+
+<script>
+const STATUSES = ["received", "processing", "retrying", "settled", "rejected", "in_repair"];
+const LABELS = {
+  received: "Received", processing: "Processing", retrying: "Retrying",
+  settled: "Settled", rejected: "Rejected", in_repair: "In repair",
+};
+const CHAOS_PRESETS = [
+  { name: "Healthy", settings: { latency_ms: 150 },
+    hint: "Every payment settles, 150 ms each so you can watch them move." },
+  { name: "Flaky", settings: { latency_ms: 150, failure_rate: 0.3 },
+    hint: "30% of sends fail with 503. Watch payments go to Retrying and back, with growing waits." },
+  { name: "Down", settings: { failure_rate: 1 },
+    hint: "Every send fails. Payments retry with backoff, then land in the repair queue. Switch back to Healthy and resubmit them." },
+  { name: "Loses answers", settings: { latency_ms: 150, drop_response_rate: 0.3, hang_seconds: 3 },
+    hint: "30% of payments settle at the rail but the answer never arrives (2s timeout). The retry asks again and the rail confirms: paid once." },
+];
+const lastStatus = new Map();
+
+function el(tag, attrs = {}, ...children) {
+  const node = document.createElement(tag);
+  for (const [key, value] of Object.entries(attrs)) {
+    if (key === "style") node.style.cssText = value;
+    else if (key.startsWith("on")) node.addEventListener(key.slice(2), value);
+    else node.setAttribute(key, value);
+  }
+  for (const child of children) node.append(child);
+  return node;
+}
+
+function pill(status) {
+  return el("span", { class: "pill", style: `--c: var(--${status})` }, LABELS[status] || status);
+}
+
+function ago(iso) {
+  const seconds = Math.max(0, Math.round((Date.now() - new Date(iso)) / 1000));
+  if (seconds < 60) return `${seconds}s ago`;
+  if (seconds < 3600) return `${Math.round(seconds / 60)}m ago`;
+  return `${Math.round(seconds / 3600)}h ago`;
+}
+
+function money(p) {
+  return `${p.currency === "GBP" ? "£" : "€"}${Number(p.amount).toLocaleString(undefined, { minimumFractionDigits: 2 })}`;
+}
+
+function renderTiles(counts) {
+  document.getElementById("tiles").replaceChildren(...STATUSES.map(status =>
+    el("div", { class: "panel tile", style: `--c: var(--${status})` },
+      el("div", { class: "n" }, String(counts[status] ?? 0)),
+      el("div", { class: "label" }, LABELS[status]))));
+}
+
+function renderQueue(queue) {
+  const box = document.getElementById("queue");
+  const leases = document.getElementById("leases");
+  if (queue.error) {
+    box.replaceChildren(el("span", { class: "error" }, queue.error));
+    leases.replaceChildren();
+    return;
+  }
+  box.replaceChildren(
+    el("div", {}, el("b", {}, String(queue.ready)), el("div", { class: "hint" }, "waiting in queue")),
+    el("div", {}, el("b", {}, String(queue.in_progress)), el("div", { class: "hint" }, "being worked on")),
+    el("div", {}, el("b", {}, String(queue.waiting_to_retry)), el("div", { class: "hint" }, "waiting to retry")));
+  leases.replaceChildren(queue.leases.length
+    ? el("table", {},
+        el("thead", {}, el("tr", {}, el("th", {}, "Payment"), el("th", {}, "Worker"), el("th", {}, "Lease left"))),
+        el("tbody", {}, ...queue.leases.map(lease => el("tr", {},
+          el("td", { class: "mono" }, lease.uetr.slice(0, 8)),
+          el("td", { class: "mono" }, lease.worker),
+          el("td", {}, `${lease.seconds_left}s`)))))
+    : el("div", { class: "empty" }, "No worker is holding a payment right now."));
+}
+
+function renderRepair(payments) {
+  const box = document.getElementById("repair");
+  if (!payments.length) {
+    box.replaceChildren(el("div", { class: "empty" }, "Empty. Nothing needs a person."));
+    return;
+  }
+  box.replaceChildren(el("table", {},
+    el("thead", {}, el("tr", {}, el("th", {}, "Payment"), el("th", {}, "Amount"), el("th", {}, "Why"), el("th", {}, ""))),
+    el("tbody", {}, ...payments.map(p => el("tr", {},
+      el("td", { class: "mono" }, p.uetr.slice(0, 8)),
+      el("td", {}, money(p)),
+      el("td", { class: "wrap" }, p.last_error || ""),
+      el("td", {}, el("button", { class: "small", onclick: () => resubmit(p.uetr) }, "Resubmit")))))));
+}
+
+function renderRecent(payments) {
+  document.getElementById("recent").replaceChildren(...payments.map(p => {
+    const changed = lastStatus.has(p.uetr) && lastStatus.get(p.uetr) !== p.status;
+    lastStatus.set(p.uetr, p.status);
+    const detail = p.rejection_reason ? `rejected: ${p.rejection_reason}` : (p.last_error || "");
+    return el("tr", { class: changed ? "flash" : "" },
+      el("td", { class: "mono" }, p.uetr.slice(0, 8)),
+      el("td", {}, p.rail),
+      el("td", {}, money(p)),
+      el("td", {}, pill(p.status)),
+      el("td", {}, String(p.attempts)),
+      el("td", {}, ago(p.updated_at)),
+      el("td", { class: "wrap" }, detail));
+  }));
+  if (!payments.length) {
+    document.getElementById("recent").replaceChildren(
+      el("tr", {}, el("td", { class: "empty", colspan: "7" }, "No payments yet. Press Send 10.")));
+  }
+}
+
+function renderChaos(rail) {
+  const hint = document.getElementById("chaos-hint");
+  const buttons = document.getElementById("chaos-buttons");
+  if (!rail.reachable) {
+    buttons.replaceChildren();
+    hint.replaceChildren(el("span", { class: "error" },
+      "Rail simulator unreachable. Start it with: uvicorn rail_sim.main:app --port 9000"));
+    return;
+  }
+  const current = JSON.stringify(normalise(rail.chaos));
+  const active = CHAOS_PRESETS.find(p => JSON.stringify(normalise(p.settings)) === current);
+  buttons.replaceChildren(...CHAOS_PRESETS.map(preset => el("button", {
+    class: preset === active ? "active" : "",
+    onclick: () => setChaos(preset.settings),
+  }, preset.name)));
+  hint.textContent = active ? active.hint : `Custom settings: ${current}`;
+}
+
+function normalise(settings) {
+  const defaults = { latency_ms: 0, failure_rate: 0, drop_response_rate: 0, hang_seconds: 5 };
+  return { ...defaults, ...settings };
+}
+
+async function refresh() {
+  try {
+    const response = await fetch("/stats");
+    if (!response.ok) throw new Error(response.status);
+    const data = await response.json();
+    renderTiles(data.counts);
+    renderQueue(data.queue);
+    renderRepair(data.repair_queue);
+    renderRecent(data.recent);
+    renderChaos(data.rail);
+    document.getElementById("dot").classList.remove("down");
+    document.getElementById("live-text").textContent = "live";
+  } catch {
+    document.getElementById("dot").classList.add("down");
+    document.getElementById("live-text").textContent = "API unreachable";
+  }
+}
+
+async function send(count) {
+  await fetch(`/demo/payments?count=${count}`, { method: "POST" });
+  refresh();
+}
+
+async function setChaos(settings) {
+  await fetch("/demo/chaos", {
+    method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify(settings),
+  });
+  refresh();
+}
+
+async function resubmit(uetr) {
+  await fetch(`/payments/${uetr}/resubmit`, { method: "POST" });
+  refresh();
+}
+
+document.querySelectorAll("[data-send]").forEach(button =>
+  button.addEventListener("click", () => send(button.dataset.send)));
+refresh();
+setInterval(refresh, 1000);
+</script>
+</body>
+</html>

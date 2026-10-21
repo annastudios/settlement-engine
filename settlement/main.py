@@ -7,7 +7,8 @@ from fastapi import Depends, FastAPI, HTTPException, Response
 from sqlalchemy import select, text, update
 from sqlalchemy.orm import Session
 
-from settlement import connections, work_queue
+from settlement import connections, dashboard, work_queue
+from settlement.connections import get_session
 from settlement.models import Base, Payment
 from settlement.payments import UetrConflict, submit_payment
 from settlement.schemas import PaymentRequest, PaymentResponse, PaymentStatus
@@ -22,12 +23,19 @@ async def lifespan(app: FastAPI):
 
 
 app = FastAPI(title="settlement-engine", lifespan=lifespan)
+app.include_router(dashboard.router)
 log = logging.getLogger("settlement.api")
 
 
-def get_session():
-    with connections.SessionLocal() as session:
-        yield session
+class _HideDashboardPolling(logging.Filter):
+    """The dashboard asks for /stats every second; keep that out of the access
+    log so the requests worth seeing aren't buried."""
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        return "GET /stats" not in record.getMessage()
+
+
+logging.getLogger("uvicorn.access").addFilter(_HideDashboardPolling())
 
 
 def _check_postgres() -> str:
