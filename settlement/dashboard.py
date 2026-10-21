@@ -8,6 +8,7 @@ behaviour. They are for local development and demos only.
 
 import random
 import uuid
+from datetime import timedelta
 from decimal import Decimal
 from pathlib import Path
 
@@ -15,10 +16,11 @@ import httpx
 import redis
 from fastapi import APIRouter, Depends, HTTPException, Query
 from fastapi.responses import FileResponse
+from pydantic import BaseModel, Field
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
-from settlement import connections, rail_client, work_queue
+from settlement import connections, rail_client, rate_limit, work_queue
 from settlement.connections import get_session
 from settlement.models import Payment
 from settlement.payments import submit_payment
@@ -33,6 +35,8 @@ _CREDITORS = ["Bob's Bakery Ltd", "Northwind Energy", "City Council Tax", "Acme 
 _DEBTOR_IBAN = "GB33BUKB20201555555555"
 _CREDITOR_IBAN = {"FPS": "GB82WEST12345698765432", "SEPA": "DE89370400440532013000"}
 _CLOSED_ACCOUNT = "GB56CLOS00000000000001"  # the rail rejects it with AC04
+# Window for measuring each rail's actual speed.
+_SPEED_WINDOW_SECONDS = 5
 
 
 @router.get("/dashboard", include_in_schema=False)
@@ -56,6 +60,7 @@ def stats(session: Session = Depends(get_session)):
     return {
         "counts": {status.value: counts.get(status.value, 0) for status in PaymentStatus},
         "queue": _queue_state(connections.redis_client),
+        "rate_limits": _rate_limits(session, connections.redis_client),
         "rail": _rail_state(),
         "recent": [_as_json(p) for p in recent],
         "repair_queue": [_as_json(p) for p in repair],
@@ -88,6 +93,32 @@ def _queue_state(r: redis.Redis) -> dict:
         }
     except redis.RedisError:
         return {"error": "Redis unreachable"}
+
+
+def _rate_limits(session: Session, r: redis.Redis) -> dict:
+    """Each rail's limit next to its actual speed: payments that reached a
+    final answer from the rail per second, over the last few seconds."""
+    finished = dict(
+        session.execute(
+            select(Payment.rail, func.count())
+            .where(
+                Payment.status.in_((PaymentStatus.SETTLED, PaymentStatus.REJECTED)),
+                Payment.updated_at > func.now() - timedelta(seconds=_SPEED_WINDOW_SECONDS),
+            )
+            .group_by(Payment.rail)
+        ).all()
+    )
+    try:
+        in_force = rate_limit.limits(r)
+    except redis.RedisError:
+        return {}
+    return {
+        rail: {
+            "limit_per_second": limit,
+            "actual_per_second": round(finished.get(rail, 0) / _SPEED_WINDOW_SECONDS, 1),
+        }
+        for rail, limit in in_force.items()
+    }
 
 
 def _rail_state() -> dict:
@@ -125,6 +156,21 @@ def _random_payment() -> PaymentRequest:
         creditor_iban=creditor_iban,
         remittance_info=f"Demo {random.randint(1000, 9999)}",
     )
+
+
+class RateLimitChange(BaseModel):
+    rail: str
+    per_second: float = Field(gt=0, le=1000)
+
+
+@router.put("/demo/rate-limits")
+def set_rate_limit(change: RateLimitChange):
+    """Change a rail's rate limit for every worker at once."""
+    try:
+        rate_limit.set_limit(connections.redis_client, change.rail, change.per_second)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    return rate_limit.limits(connections.redis_client)
 
 
 @router.put("/demo/chaos")

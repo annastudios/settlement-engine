@@ -89,5 +89,31 @@ def test_demo_chaos_changes_the_rail(client, rail):
     assert rail.get("/chaos").json()["failure_rate"] == 1
 
 
+def test_stats_show_each_rails_limit_and_speed(client):
+    client.post("/payments", json=fps_payment())
+    worker.process_one(r, "worker-a")
+
+    limits = client.get("/stats").json()["rate_limits"]
+
+    assert limits["FPS"]["limit_per_second"] == 10
+    assert limits["FPS"]["actual_per_second"] == 0.2  # 1 payment in the last 5s
+    assert limits["SEPA"]["actual_per_second"] == 0
+
+
+def test_demo_rate_limit_change(client):
+    response = client.put("/demo/rate-limits", json={"rail": "FPS", "per_second": 3})
+
+    assert response.status_code == 200
+    assert response.json()["FPS"] == 3
+    assert client.get("/stats").json()["rate_limits"]["FPS"]["limit_per_second"] == 3
+
+
+@pytest.mark.parametrize(
+    "change", [{"rail": "SWIFT", "per_second": 3}, {"rail": "FPS", "per_second": 0}]
+)
+def test_demo_rate_limit_change_rejects_invalid_input(client, change):
+    assert client.put("/demo/rate-limits", json=change).status_code == 422
+
+
 def test_demo_chaos_rejects_invalid_settings(client):
     assert client.put("/demo/chaos", json={"failure_rate": 5}).status_code == 422

@@ -9,8 +9,8 @@ no payment was lost or processed twice.
 > Work in progress. Payments are submitted, queued, and sent by workers to
 > a simulated rail that settles, rejects, fails and loses answers. Failed
 > sends are retried with backoff, payments that keep failing land in a
-> repair queue, and payments left behind by crashed workers (or lost by
-> Redis) are recovered. The rate limiter comes next.
+> repair queue, payments left behind by crashed workers (or lost by Redis)
+> are recovered, and each rail has a rate limit shared by all workers.
 
 ## Design in one line
 
@@ -45,6 +45,8 @@ Then open the **live dashboard** at http://localhost:8000/dashboard.
 `/dashboard` refreshes every second and shows:
 
 - How many payments are in each state
+- Each rail's actual speed next to its rate limit, with buttons to change
+  the limit
 - What Redis holds right now: waiting in the queue, being worked on (which
   worker holds which payment, and how long its lease has left), waiting to
   retry
@@ -78,6 +80,7 @@ change, reset the dev database with `docker compose down -v`.
 | `GET /stats` | Everything the dashboard shows, as JSON. |
 | `POST /demo/payments?count=N` | Submit N random test payments (1-200). Dev/demo only. |
 | `PUT /demo/chaos` | Change the rail simulator's behaviour. Dev/demo only. |
+| `PUT /demo/rate-limits` | Change a rail's rate limit for all workers, e.g. `{"rail": "FPS", "per_second": 5}`. Dev/demo only. |
 
 A payment is loosely modelled on ISO 20022 pacs.008:
 
@@ -206,3 +209,31 @@ so there is no extra process to forget to start. It handles:
 This is what makes "Redis only coordinates" true:
 `test_whole_queue_is_rebuilt_from_postgres_after_redis_is_wiped` empties
 Redis completely and every payment still settles, each sent once.
+
+## Rate limits
+
+Each rail accepts at most N payments per second from us (`RATE_LIMIT_FPS`,
+default 10; `RATE_LIMIT_SEPA`, default 5), however many workers are running.
+The limit lives in Redis, so it is shared, and can be changed while running
+(the dashboard has buttons for it).
+
+Every payment **books the next free slot** on its rail (the GCRA algorithm,
+a close cousin of the token bucket), in one atomic Lua step:
+
+- Slot is now → sent straight away. Up to one second's worth go through as
+  a burst.
+- Slot is in the future → the payment is parked in the delayed set until
+  then, and sent without booking again when it comes back. That is not a
+  failed attempt and its status doesn't change.
+
+Because workers park over-limit payments instead of waiting for a slot, a
+busy rail never holds up the other one
+(`test_busy_rail_does_not_hold_up_the_other_rail`), and parked payments
+come back exactly at the rail's pace instead of all retrying at once.
+`test_concurrent_workers_never_book_the_same_slot` has 8 workers book 80
+slots at once: exactly 10 go now and the other 70 get their own slot, 100 ms
+apart. Live, with 3 workers and FPS limited to 5/s, a batch of 100 finished
+at 5 FPS payments per second after a one-second burst.
+
+Changing a limit applies to new bookings; slots already booked keep their
+times.

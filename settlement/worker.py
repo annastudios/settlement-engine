@@ -14,10 +14,10 @@ import uuid
 from collections.abc import Callable
 
 import redis
-from sqlalchemy import update
+from sqlalchemy import select, update
 from sqlalchemy.orm import Session
 
-from settlement import config, connections, recovery, work_queue
+from settlement import config, connections, rate_limit, recovery, work_queue
 from settlement.backoff import backoff_seconds
 from settlement.models import Payment
 from settlement.rail_client import RailRejected, RailUnavailable, send_to_rail
@@ -44,12 +44,31 @@ def process_one(
     if uetr is None:
         return None
     with connections.SessionLocal() as session:
+        slot_in = _rail_slot(r, session, uetr)
+        if slot_in > 0:
+            # Over the rail's rate limit: park it until its booked slot. Not
+            # an attempt (nothing was sent) and its status doesn't change.
+            work_queue.retry_later(r, uetr, worker_id, slot_in)
+            return uetr
         retry_in = _process(session, uuid.UUID(uetr), send)
     if retry_in is None:
         work_queue.ack(r, uetr, worker_id)
     else:
         work_queue.retry_later(r, uetr, worker_id, retry_in)
     return uetr
+
+
+def _rail_slot(r: redis.Redis, session: Session, uetr: str) -> float:
+    """Seconds until this payment may be sent under its rail's rate limit."""
+    if r.srem(rate_limit.BOOKED, uetr):
+        return 0.0  # parked earlier with a slot booked, and the slot is here
+    rail = session.scalar(select(Payment.rail).where(Payment.uetr == uuid.UUID(uetr)))
+    if rail is None:
+        return 0.0  # unknown payment: _process will skip it
+    slot_in = rate_limit.book_slot(r, rail)
+    if slot_in > 0:
+        r.sadd(rate_limit.BOOKED, uetr)
+    return slot_in
 
 
 def _process(

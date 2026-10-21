@@ -19,9 +19,10 @@ LEASES = "payments:leases"
 LEASE_OWNERS = "payments:lease_owners"
 DELAYED = "payments:delayed"
 
-# Shared by the scripts below: the current time in ms from Redis's own clock,
-# so workers with wrong clocks can't skew leases or retry times.
-_NOW_MS = """
+# Shared by the Lua scripts here and in rate_limit.py: the current time in ms
+# from Redis's own clock, so workers with wrong clocks can't skew leases,
+# retry times or rate limits.
+LUA_NOW_MS = """
 local now = redis.call('TIME')
 local now_ms = tonumber(now[1]) * 1000 + math.floor(tonumber(now[2]) / 1000)
 """
@@ -29,7 +30,7 @@ local now_ms = tonumber(now[1]) * 1000 + math.floor(tonumber(now[2]) / 1000)
 # First move retries whose wait is over back onto the ready list, then take
 # the next payment AND record the lease, all in one atomic step: two workers
 # can never claim the same payment.
-_CLAIM = _NOW_MS + """
+_CLAIM = LUA_NOW_MS + """
 local due = redis.call('ZRANGEBYSCORE', KEYS[4], '-inf', now_ms, 'LIMIT', 0, 100)
 for _, due_uetr in ipairs(due) do
   redis.call('ZREM', KEYS[4], due_uetr)
@@ -60,7 +61,7 @@ return 1
 # Take every lease whose deadline has passed (its worker stopped or stalled)
 # and remove it, in one atomic step: if several workers run recovery at the
 # same time, each expired lease is handed to exactly one of them.
-_RECLAIM_EXPIRED = _NOW_MS + """
+_RECLAIM_EXPIRED = LUA_NOW_MS + """
 local expired = redis.call('ZRANGEBYSCORE', KEYS[1], '-inf', now_ms, 'LIMIT', 0, 100)
 for _, uetr in ipairs(expired) do
   redis.call('ZREM', KEYS[1], uetr)
@@ -70,7 +71,7 @@ return expired
 """
 
 # Like ack, then park the payment in the delayed set until its retry is due.
-_RETRY_LATER = _NOW_MS + """
+_RETRY_LATER = LUA_NOW_MS + """
 if redis.call('HGET', KEYS[2], ARGV[1]) ~= ARGV[2] then
   return 0
 end

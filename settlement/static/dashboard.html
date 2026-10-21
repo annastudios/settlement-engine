@@ -63,6 +63,16 @@
     color: var(--c); border: 1px solid var(--c);
   }
   .mono { font-family: ui-monospace, Consolas, monospace; font-size: 12px; }
+  .limits { margin-bottom: 12px; }
+  .limit-row {
+    display: grid; grid-template-columns: 48px minmax(80px, 1fr) 130px auto;
+    gap: 12px; align-items: center; margin-bottom: 8px;
+  }
+  @media (max-width: 600px) { .limit-row { grid-template-columns: 48px 1fr; } }
+  .bar { height: 10px; background: var(--line); border-radius: 5px; overflow: hidden; }
+  .bar > span { display: block; height: 100%; background: var(--processing); transition: width .6s; }
+  .bar.at-limit > span { background: var(--retrying); }
+  .speed { font-variant-numeric: tabular-nums; }
   .empty { color: var(--muted); padding: 8px 0; }
   .error { color: var(--rejected); }
 </style>
@@ -91,6 +101,12 @@
       <div class="buttons" id="chaos-buttons"></div>
       <div class="hint" id="chaos-hint"></div>
     </div>
+  </section>
+
+  <section class="panel limits">
+    <h2>Rate limits (per rail, shared by all workers)</h2>
+    <div id="limits"></div>
+    <div class="hint">Bar = payments finished per second over the last 5s. Over the limit, a payment is parked until its booked slot (it shows in "waiting to retry"), not counted as a failed attempt.</div>
   </section>
 
   <section class="grid row2">
@@ -133,6 +149,13 @@ const CHAOS_PRESETS = [
     hint: "30% of payments settle at the rail but the answer never arrives (2s timeout). The retry asks again and the rail confirms: paid once." },
 ];
 const lastStatus = new Map();
+
+// The page redraws every second. A redraw between pressing and releasing
+// the mouse replaces the button under it, and the browser drops the click.
+// So don't redraw while a pointer is down.
+let pointerDown = false;
+document.addEventListener("pointerdown", () => { pointerDown = true; });
+document.addEventListener("pointerup", () => setTimeout(() => { pointerDown = false; }, 0));
 
 function el(tag, attrs = {}, ...children) {
   const node = document.createElement(tag);
@@ -178,7 +201,7 @@ function renderQueue(queue) {
   box.replaceChildren(
     el("div", {}, el("b", {}, String(queue.ready)), el("div", { class: "hint" }, "waiting in queue")),
     el("div", {}, el("b", {}, String(queue.in_progress)), el("div", { class: "hint" }, "being worked on")),
-    el("div", {}, el("b", {}, String(queue.waiting_to_retry)), el("div", { class: "hint" }, "waiting to retry")));
+    el("div", {}, el("b", {}, String(queue.waiting_to_retry)), el("div", { class: "hint" }, "waiting to retry or for a rate-limit slot")));
   leases.replaceChildren(queue.leases.length
     ? el("table", {},
         el("thead", {}, el("tr", {}, el("th", {}, "Payment"), el("th", {}, "Worker"), el("th", {}, "Lease left"))),
@@ -187,6 +210,36 @@ function renderQueue(queue) {
           el("td", { class: "mono" }, lease.worker),
           el("td", {}, `${lease.seconds_left}s`)))))
     : el("div", { class: "empty" }, "No worker is holding a payment right now."));
+}
+
+const LIMIT_CHOICES = [2, 5, 10, 50];
+
+function renderLimits(limits) {
+  const box = document.getElementById("limits");
+  const rails = Object.entries(limits || {});
+  if (!rails.length) {
+    box.replaceChildren(el("div", { class: "error" }, "Rate limits unavailable (Redis unreachable)"));
+    return;
+  }
+  box.replaceChildren(...rails.map(([rail, { limit_per_second: limit, actual_per_second: actual }]) => {
+    const fill = Math.min(100, (actual / limit) * 100);
+    return el("div", { class: "limit-row" },
+      el("b", {}, rail),
+      el("div", { class: `bar${fill >= 90 ? " at-limit" : ""}` }, el("span", { style: `width: ${fill}%` })),
+      el("span", { class: "speed" }, `${actual.toFixed(1)} / ${limit} per sec`),
+      el("div", { class: "buttons" }, ...LIMIT_CHOICES.map(choice => el("button", {
+        class: `small${choice === limit ? " active" : ""}`,
+        onclick: () => setLimit(rail, choice),
+      }, String(choice)))));
+  }));
+}
+
+async function setLimit(rail, perSecond) {
+  await fetch("/demo/rate-limits", {
+    method: "PUT", headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ rail, per_second: perSecond }),
+  });
+  refresh();
 }
 
 function renderRepair(payments) {
@@ -252,8 +305,10 @@ async function refresh() {
     const response = await fetch("/stats");
     if (!response.ok) throw new Error(response.status);
     const data = await response.json();
+    if (pointerDown) return;
     renderTiles(data.counts);
     renderQueue(data.queue);
+    renderLimits(data.rate_limits);
     renderRepair(data.repair_queue);
     renderRecent(data.recent);
     renderChaos(data.rail);

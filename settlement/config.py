@@ -30,3 +30,10 @@ RETRY_MAX_DELAY_SECONDS = float(os.getenv("RETRY_MAX_DELAY_SECONDS", "60"))
 LEASE_SECONDS = int(os.getenv("LEASE_SECONDS", "30"))
 RECOVERY_INTERVAL_SECONDS = float(os.getenv("RECOVERY_INTERVAL_SECONDS", "10"))
 ORPHAN_AFTER_SECONDS = float(os.getenv("ORPHAN_AFTER_SECONDS", "60"))
+
+# Most payments each rail accepts from us per second, shared by all workers.
+# Can be changed while running (rate_limit.set_limit, or the dashboard).
+RATE_LIMITS = {
+    "FPS": float(os.getenv("RATE_LIMIT_FPS", "10")),
+    "SEPA": float(os.getenv("RATE_LIMIT_SEPA", "5")),
+}
