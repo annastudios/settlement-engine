@@ -9,6 +9,7 @@ import os
 import signal
 import socket
 import threading
+import time
 import uuid
 from collections.abc import Callable
 
@@ -16,7 +17,7 @@ import redis
 from sqlalchemy import update
 from sqlalchemy.orm import Session
 
-from settlement import config, connections, work_queue
+from settlement import config, connections, recovery, work_queue
 from settlement.backoff import backoff_seconds
 from settlement.models import Payment
 from settlement.rail_client import RailRejected, RailUnavailable, send_to_rail
@@ -36,7 +37,8 @@ def process_one(
     Settled, rejected and in_repair are final for now, so the lease is
     released. A payment to retry is parked in Redis until its retry is due.
     Anything unexpected (a bug, Postgres down) raises and the lease is NOT
-    released, so the payment is not lost.
+    released, so the payment is not lost: once the lease expires, recovery
+    puts it back in line.
     """
     uetr = work_queue.claim(r, worker_id)
     if uetr is None:
@@ -135,11 +137,19 @@ def run(
     poll_seconds: float = 0.2,
     stop: threading.Event | None = None,
 ) -> None:
-    """Process payments until stop is set. Waits poll_seconds when nothing is ready."""
+    """Process payments until stop is set. Waits poll_seconds when nothing is
+    ready, and runs crash recovery every RECOVERY_INTERVAL_SECONDS."""
     worker_id = worker_id or f"{socket.gethostname()}-{os.getpid()}"
     stop = stop or threading.Event()
+    next_recovery = 0.0
     log.info("worker %s started", worker_id)
     while not stop.is_set():
+        if time.monotonic() >= next_recovery:
+            next_recovery = time.monotonic() + config.RECOVERY_INTERVAL_SECONDS
+            try:
+                recovery.recover(connections.redis_client)
+            except Exception:
+                log.exception("crash recovery failed; will try again")
         try:
             if process_one(connections.redis_client, worker_id) is None:
                 stop.wait(poll_seconds)

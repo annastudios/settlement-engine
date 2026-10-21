@@ -3,13 +3,12 @@ import uuid
 from concurrent.futures import ThreadPoolExecutor
 
 import pytest
-import redis
 
 from settlement import connections, work_queue
 from settlement.connections import SessionLocal, redis_client
 from settlement.payments import submit_payment
 from settlement.schemas import PaymentRequest
-from tests.factories import count_payments, fps_payment, sepa_payment
+from tests.factories import count_payments, dead_redis, fps_payment, sepa_payment
 
 
 def test_submit_fps_payment(client):
@@ -80,8 +79,7 @@ def test_new_payment_is_queued_for_processing(client):
 
 def test_payment_is_accepted_even_if_redis_is_down(client, monkeypatch):
     # Postgres has it, so the client must get 201, not an error.
-    dead_redis = redis.Redis(host="127.0.0.1", port=1, socket_connect_timeout=1)
-    monkeypatch.setattr(connections, "redis_client", dead_redis)
+    monkeypatch.setattr(connections, "redis_client", dead_redis())
     payment = fps_payment()
 
     response = client.post("/payments", json=payment)

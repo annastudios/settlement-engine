@@ -36,6 +36,11 @@ class Payment(Base):
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now()
     )
+    # Set on every change. Recovery uses it to tell a payment that is quietly
+    # stuck from one that was touched a moment ago.
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), onupdate=func.now()
+    )
 
     # The API validates this too; the database is the last line of defence.
     __table_args__ = (CheckConstraint("amount > 0", name="amount_positive"),)

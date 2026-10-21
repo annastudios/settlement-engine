@@ -73,3 +73,4 @@ class PaymentResponse(PaymentRequest):
     attempts: int
     last_error: str | None = None
     created_at: datetime
+    updated_at: datetime

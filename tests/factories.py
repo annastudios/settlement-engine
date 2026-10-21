@@ -1,5 +1,8 @@
 import uuid
 
+import redis
+from redis.backoff import NoBackoff
+from redis.retry import Retry
 from sqlalchemy import func, select
 
 from settlement.connections import SessionLocal
@@ -34,6 +37,15 @@ def sepa_payment(**overrides):
 def count_payments():
     with SessionLocal() as session:
         return session.scalar(select(func.count()).select_from(Payment))
+
+
+def dead_redis():
+    """A Redis client pointing where nothing listens. redis.Redis() retries
+    10 times with backoff by default (~15s per call); turned off here so
+    tests fail fast."""
+    return redis.Redis(
+        host="127.0.0.1", port=1, socket_connect_timeout=1, retry=Retry(NoBackoff(), 0)
+    )
 
 
 def payment_status(uetr):

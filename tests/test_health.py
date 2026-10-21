@@ -1,6 +1,5 @@
-import redis
-
 from settlement import connections
+from tests.factories import dead_redis
 
 
 def test_health_ok_when_postgres_and_redis_are_up(client):
@@ -14,9 +13,7 @@ def test_health_ok_when_postgres_and_redis_are_up(client):
 
 
 def test_health_degraded_when_redis_is_down(client, monkeypatch):
-    # Nothing listens on port 1, so the connection is refused straight away.
-    dead_redis = redis.Redis(host="127.0.0.1", port=1, socket_connect_timeout=1)
-    monkeypatch.setattr(connections, "redis_client", dead_redis)
+    monkeypatch.setattr(connections, "redis_client", dead_redis())
 
     response = client.get("/health")
 

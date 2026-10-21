@@ -8,8 +8,9 @@ no payment was lost or processed twice.
 
 > Work in progress. Payments are submitted, queued, and sent by workers to
 > a simulated rail that settles, rejects, fails and loses answers. Failed
-> sends are retried with backoff; payments that keep failing land in a
-> repair queue. Crash recovery comes next.
+> sends are retried with backoff, payments that keep failing land in a
+> repair queue, and payments left behind by crashed workers (or lost by
+> Redis) are recovered. The rate limiter comes next.
 
 ## Design in one line
 
@@ -99,10 +100,10 @@ received ──► processing ──► settled
   `received` (a conditional `UPDATE`). Redis decides *who* works on a payment;
   Postgres guarantees it happens *once*, even if a UETR is queued twice.
 - **Failures don't lose payments.** If processing fails unexpectedly (a bug,
-  Postgres down), the lease is kept and the payment stays `processing`;
-  recovering expired leases is a later step. If Redis is down at submission,
-  the payment is still accepted (it is safe in Postgres) and waits in
-  `received`.
+  Postgres down), the lease is kept and the payment stays `processing` until
+  crash recovery (below) picks it up. If Redis is down at submission, the
+  payment is still accepted (it is safe in Postgres) and recovery queues it
+  later.
 
 Proven by `test_concurrent_workers_never_claim_the_same_payment` (8 workers
 racing for 300 payments: none claimed twice, none missed).
@@ -154,3 +155,27 @@ with `GET /repair-queue` and, once the problem is fixed, give it a fresh set
 of attempts with `POST /payments/{uetr}/resubmit`. That is safe even if an
 earlier attempt did go through: the same UETR is resent and the rail
 dedupes it.
+
+## Crash recovery
+
+Every worker runs a recovery pass every `RECOVERY_INTERVAL_SECONDS` (10s),
+so there is no extra process to forget to start. It handles:
+
+| What happened | How it's spotted | What recovery does |
+|---|---|---|
+| A worker died (or stalled) holding a payment | Its lease passed `LEASE_SECONDS` (30s) | `processing` → `retrying` and re-queued; resent with the same UETR, so a send that secretly went through isn't paid twice |
+| A worker died after finishing, before releasing its lease | Lease expired, payment already final | Lease cleaned up; **not** resent |
+| A payment never reached Redis, or Redis was wiped | In flight in Postgres, unchanged for `ORPHAN_AFTER_SECONDS` (60s), unknown to Redis | Re-queued from Postgres |
+
+- A crashed attempt still counts as an attempt, so a "poison" payment that
+  crashes the worker every time ends in the repair queue instead of looping
+  forever.
+- Running it on many workers at once is safe: taking expired leases is one
+  atomic Lua step (each goes to exactly one worker), and a payment queued
+  twice is skipped by the Postgres guard.
+- A payment changed recently (`updated_at`) is never treated as lost, so one
+  a worker is handling right now is left alone.
+
+This is what makes "Redis only coordinates" true:
+`test_whole_queue_is_rebuilt_from_postgres_after_redis_is_wiped` empties
+Redis completely and every payment still settles, each sent once.
