@@ -1,0 +1,49 @@
+# Dependencies for settlement-engine:
+#   postgres  - source of truth: payments and their audit trail
+#   redis     - coordinates work: queue, leases, retries, rate limits
+# Ports are published on 127.0.0.1 only, so the app and tests running on
+# your machine can reach them, but nothing outside it can.
+# Memory is capped per container because the dev laptop has little RAM.
+# Data lives in named volumes; only `docker compose down -v` deletes it.
+
+services:
+  postgres:
+    image: postgres:17-alpine
+    environment:
+      POSTGRES_USER: settlement
+      POSTGRES_DB: settlement
+      # Local-only default. Set POSTGRES_PASSWORD in .env to override.
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-settlement-local-dev}
+    ports:
+      - "127.0.0.1:5432:5432"
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD", "pg_isready", "-U", "settlement", "-d", "settlement"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+    mem_limit: 256m
+    restart: unless-stopped
+
+  redis:
+    image: redis:8.2-alpine
+    # appendonly: the queue survives a Redis restart.
+    # noeviction: Redis must never silently drop queued payments when it is
+    # full; it should refuse new writes instead.
+    command: ["redis-server", "--appendonly", "yes", "--maxmemory", "48mb", "--maxmemory-policy", "noeviction"]
+    ports:
+      - "127.0.0.1:6379:6379"
+    volumes:
+      - redis-data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+    mem_limit: 64m
+    restart: unless-stopped
+
+volumes:
+  postgres-data:
+  redis-data:
