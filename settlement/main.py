@@ -1,11 +1,13 @@
+import logging
 import uuid
 from contextlib import asynccontextmanager
 
+import redis
 from fastapi import Depends, FastAPI, HTTPException, Response
 from sqlalchemy import text
 from sqlalchemy.orm import Session
 
-from settlement import connections
+from settlement import connections, work_queue
 from settlement.models import Base, Payment
 from settlement.payments import UetrConflict, submit_payment
 from settlement.schemas import PaymentRequest, PaymentResponse
@@ -20,6 +22,7 @@ async def lifespan(app: FastAPI):
 
 
 app = FastAPI(title="settlement-engine", lifespan=lifespan)
+log = logging.getLogger("settlement.api")
 
 
 def get_session():
@@ -68,6 +71,15 @@ def create_payment(
         raise HTTPException(status_code=409, detail=str(exc))
     if not created:
         response.status_code = 200
+        return payment
+
+    # The payment is already safely in Postgres, so a Redis failure here must
+    # not fail the request. The payment then waits in 'received' until
+    # recovery (step 5) re-queues payments that never reached the queue.
+    try:
+        work_queue.enqueue(connections.redis_client, str(payment.uetr))
+    except redis.RedisError:
+        log.exception("payment %s stored but not queued", payment.uetr)
     return payment
 
 

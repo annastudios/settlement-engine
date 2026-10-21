@@ -14,7 +14,9 @@ class Rail(StrEnum):
 
 
 class PaymentStatus(StrEnum):
-    RECEIVED = "received"
+    RECEIVED = "received"  # stored and queued, waiting for a worker
+    PROCESSING = "processing"  # a worker is sending it to the rail
+    SETTLED = "settled"  # the rail accepted it: money moved
 
 
 # Each rail settles in exactly one currency.

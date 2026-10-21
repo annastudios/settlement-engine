@@ -12,7 +12,7 @@ import pytest  # noqa: E402
 from fastapi.testclient import TestClient  # noqa: E402
 from sqlalchemy import create_engine, make_url, text  # noqa: E402
 
-from settlement.connections import engine  # noqa: E402
+from settlement.connections import engine, redis_client  # noqa: E402
 from settlement.main import app  # noqa: E402
 from settlement.models import Base  # noqa: E402
 
@@ -46,6 +46,8 @@ def _schema():
 def _empty_tables():
     with engine.begin() as conn:
         conn.execute(text("TRUNCATE payments"))
+    # Only the test Redis DB (1), never the dev one.
+    redis_client.flushdb()
 
 
 @pytest.fixture

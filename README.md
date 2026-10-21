@@ -6,8 +6,8 @@ Faster Payments and SEPA, retried safely when a rail fails, rate-limited so the
 rails are never overloaded, and reconciled at the end of the day to prove that
 no payment was lost or processed twice.
 
-> Work in progress. Payments can be submitted and looked up; processing
-> comes next.
+> Work in progress. Payments are submitted, queued and processed by
+> workers; the rail simulator (real failures) comes next.
 
 ## Design in one line
 
@@ -26,6 +26,7 @@ python -m venv .venv
 pip install -r requirements-dev.txt
 pytest -v
 uvicorn settlement.main:app --reload # then open http://localhost:8000/docs
+python -m settlement.worker          # in another terminal; run several for more workers
 ```
 
 Tests use a separate `settlement_test` database (created automatically), so
@@ -65,3 +66,25 @@ follow ISO 20022's 140-character limit.
 `INSERT ... ON CONFLICT DO NOTHING`, so Postgres decides atomically. Even 10
 copies of a payment arriving at the same instant store exactly one (see
 `test_concurrent_duplicates_create_exactly_one_payment`).
+
+## Processing
+
+A new payment is stored in Postgres, then its UETR is pushed onto a Redis
+queue. Workers (`python -m settlement.worker`) take payments off the queue:
+
+`received` → `processing` → `settled`
+
+- **Atomic claim with a lease.** One Lua script pops the next payment *and*
+  records a lease (deadline + owning worker) in a single step, so two workers
+  can never claim the same payment. The deadline uses Redis's clock, not the
+  worker's. Only the lease owner can release it.
+- **Postgres guard.** A worker only starts a payment whose status is still
+  `received` (a conditional `UPDATE`). Redis decides *who* works on a payment;
+  Postgres guarantees it happens *once*, even if a UETR is queued twice.
+- **Failures don't lose payments.** If processing fails, the lease is kept and
+  the payment stays `processing`; recovering expired leases is a later step.
+  If Redis is down at submission, the payment is still accepted (it is safe in
+  Postgres) and waits in `received`.
+
+Proven by `test_concurrent_workers_never_claim_the_same_payment` (8 workers
+racing for 300 payments: none claimed twice, none missed).

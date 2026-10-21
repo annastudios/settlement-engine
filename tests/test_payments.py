@@ -3,41 +3,13 @@ import uuid
 from concurrent.futures import ThreadPoolExecutor
 
 import pytest
-from sqlalchemy import func, select
+import redis
 
-from settlement.connections import SessionLocal
-from settlement.models import Payment
+from settlement import connections, work_queue
+from settlement.connections import SessionLocal, redis_client
 from settlement.payments import submit_payment
 from settlement.schemas import PaymentRequest
-
-
-def fps_payment(**overrides):
-    payment = {
-        "uetr": str(uuid.uuid4()),
-        "rail": "FPS",
-        "amount": "250.00",
-        "currency": "GBP",
-        "debtor_name": "Alice Smith",
-        "debtor_iban": "GB33BUKB20201555555555",
-        "creditor_name": "Bob's Bakery Ltd",
-        "creditor_iban": "GB82WEST12345698765432",
-        "remittance_info": "Invoice 1042",
-    }
-    return payment | overrides
-
-
-def sepa_payment(**overrides):
-    return fps_payment(
-        rail="SEPA",
-        currency="EUR",
-        creditor_iban="DE89370400440532013000",
-        **overrides,
-    )
-
-
-def count_payments():
-    with SessionLocal() as session:
-        return session.scalar(select(func.count()).select_from(Payment))
+from tests.factories import count_payments, fps_payment, sepa_payment
 
 
 def test_submit_fps_payment(client):
@@ -93,6 +65,28 @@ def test_same_payment_twice_is_stored_once(client):
     assert first.status_code == 201
     assert second.status_code == 200
     assert second.json() == first.json()
+    assert count_payments() == 1
+    # Queued once only: the repeat must not create a second job.
+    assert redis_client.lrange(work_queue.READY, 0, -1) == [payment["uetr"]]
+
+
+def test_new_payment_is_queued_for_processing(client):
+    payment = fps_payment()
+
+    client.post("/payments", json=payment)
+
+    assert redis_client.lrange(work_queue.READY, 0, -1) == [payment["uetr"]]
+
+
+def test_payment_is_accepted_even_if_redis_is_down(client, monkeypatch):
+    # Postgres has it, so the client must get 201, not an error.
+    dead_redis = redis.Redis(host="127.0.0.1", port=1, socket_connect_timeout=1)
+    monkeypatch.setattr(connections, "redis_client", dead_redis)
+    payment = fps_payment()
+
+    response = client.post("/payments", json=payment)
+
+    assert response.status_code == 201
     assert count_payments() == 1
 
 
