@@ -16,8 +16,10 @@ class Rail(StrEnum):
 class PaymentStatus(StrEnum):
     RECEIVED = "received"  # stored and queued, waiting for a worker
     PROCESSING = "processing"  # a worker is sending it to the rail
+    RETRYING = "retrying"  # the rail was unavailable; waiting for the next attempt
     SETTLED = "settled"  # the rail accepted it: money moved
     REJECTED = "rejected"  # the rail refused it for good; see rejection_reason
+    IN_REPAIR = "in_repair"  # out of attempts; needs a person (the repair queue)
 
 
 # Each rail settles in exactly one currency.
@@ -68,4 +70,6 @@ class PaymentResponse(PaymentRequest):
     status: PaymentStatus
     # ISO 20022 reason code from the rail, e.g. AC04 = closed account.
     rejection_reason: str | None = None
+    attempts: int
+    last_error: str | None = None
     created_at: datetime

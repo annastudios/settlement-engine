@@ -53,6 +53,44 @@ def test_ack_by_another_worker_is_refused():
     assert r.hget(work_queue.LEASE_OWNERS, "p1") == "worker-a"
 
 
+def test_retry_later_releases_the_lease_and_parks_the_payment():
+    work_queue.enqueue(r, "p1")
+    work_queue.claim(r, "worker-a")
+
+    assert work_queue.retry_later(r, "p1", "worker-a", delay_seconds=60) is True
+
+    assert r.zscore(work_queue.LEASES, "p1") is None
+    assert r.hget(work_queue.LEASE_OWNERS, "p1") is None
+    assert r.zscore(work_queue.DELAYED, "p1") is not None
+
+
+def test_retry_is_not_claimable_before_it_is_due():
+    work_queue.enqueue(r, "p1")
+    work_queue.claim(r, "worker-a")
+    work_queue.retry_later(r, "p1", "worker-a", delay_seconds=60)
+
+    assert work_queue.claim(r, "worker-b") is None
+
+
+def test_due_retry_is_claimable_again():
+    work_queue.enqueue(r, "p1")
+    work_queue.claim(r, "worker-a")
+    work_queue.retry_later(r, "p1", "worker-a", delay_seconds=0)
+
+    assert work_queue.claim(r, "worker-b") == "p1"
+    assert r.zscore(work_queue.DELAYED, "p1") is None
+
+
+def test_retry_later_by_another_worker_is_refused():
+    work_queue.enqueue(r, "p1")
+    work_queue.claim(r, "worker-a")
+
+    assert work_queue.retry_later(r, "p1", "worker-b", delay_seconds=0) is False
+
+    assert r.hget(work_queue.LEASE_OWNERS, "p1") == "worker-a"
+    assert r.zscore(work_queue.DELAYED, "p1") is None
+
+
 def test_concurrent_workers_never_claim_the_same_payment():
     uetrs = [f"p{i}" for i in range(300)]
     for uetr in uetrs:

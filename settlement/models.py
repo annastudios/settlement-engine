@@ -2,7 +2,7 @@ import uuid
 from datetime import datetime
 from decimal import Decimal
 
-from sqlalchemy import CheckConstraint, DateTime, Numeric, String, Uuid, func
+from sqlalchemy import CheckConstraint, DateTime, Integer, Numeric, String, Text, Uuid, func
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
 
@@ -29,6 +29,10 @@ class Payment(Base):
     status: Mapped[str] = mapped_column(String(16))
     # ISO 20022 reason code when the rail rejects the payment (e.g. AC04).
     rejection_reason: Mapped[str | None] = mapped_column(String(4))
+    # How many times this payment has been sent to the rail.
+    attempts: Mapped[int] = mapped_column(Integer, default=0, server_default="0")
+    # Why the last attempt failed, for whoever looks at the repair queue.
+    last_error: Mapped[str | None] = mapped_column(Text)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now()
     )

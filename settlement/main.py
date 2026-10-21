@@ -4,13 +4,13 @@ from contextlib import asynccontextmanager
 
 import redis
 from fastapi import Depends, FastAPI, HTTPException, Response
-from sqlalchemy import text
+from sqlalchemy import select, text, update
 from sqlalchemy.orm import Session
 
 from settlement import connections, work_queue
 from settlement.models import Base, Payment
 from settlement.payments import UetrConflict, submit_payment
-from settlement.schemas import PaymentRequest, PaymentResponse
+from settlement.schemas import PaymentRequest, PaymentResponse, PaymentStatus
 
 
 @asynccontextmanager
@@ -88,4 +88,36 @@ def get_payment(uetr: uuid.UUID, session: Session = Depends(get_session)):
     payment = session.get(Payment, uetr)
     if payment is None:
         raise HTTPException(status_code=404, detail="payment not found")
+    return payment
+
+
+@app.get("/repair-queue", response_model=list[PaymentResponse])
+def repair_queue(session: Session = Depends(get_session)):
+    """Payments that ran out of attempts and need a person, oldest first."""
+    return session.scalars(
+        select(Payment)
+        .where(Payment.status == PaymentStatus.IN_REPAIR)
+        .order_by(Payment.created_at)
+    ).all()
+
+
+@app.post("/payments/{uetr}/resubmit", response_model=PaymentResponse)
+def resubmit_payment(uetr: uuid.UUID, session: Session = Depends(get_session)):
+    """Give a payment from the repair queue a fresh set of attempts, e.g. once
+    the rail is healthy again. Safe even if an earlier attempt did go through:
+    it is resent with the same UETR, which the rail dedupes."""
+    moved = session.execute(
+        update(Payment)
+        .where(Payment.uetr == uetr, Payment.status == PaymentStatus.IN_REPAIR)
+        .values(status=PaymentStatus.RETRYING, attempts=0)
+    ).rowcount
+    session.commit()
+    payment = session.get(Payment, uetr, populate_existing=True)
+    if payment is None:
+        raise HTTPException(status_code=404, detail="payment not found")
+    if not moved:
+        raise HTTPException(
+            status_code=409, detail=f"payment is {payment.status}, not in the repair queue"
+        )
+    work_queue.enqueue(connections.redis_client, str(uetr))
     return payment

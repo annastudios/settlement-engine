@@ -15,3 +15,9 @@ REDIS_URL = os.getenv("REDIS_URL", "redis://127.0.0.1:6379/0")
 RAIL_URL = os.getenv("RAIL_URL", "http://127.0.0.1:9000")
 # How long to wait for the rail before treating the outcome as unknown.
 RAIL_TIMEOUT_SECONDS = float(os.getenv("RAIL_TIMEOUT_SECONDS", "2"))
+
+# Retries when the rail is unavailable: wait about 1s, 2s, 4s, ... (capped),
+# and after MAX_ATTEMPTS sends in total, move the payment to the repair queue.
+MAX_ATTEMPTS = int(os.getenv("MAX_ATTEMPTS", "5"))
+RETRY_BASE_SECONDS = float(os.getenv("RETRY_BASE_SECONDS", "1"))
+RETRY_MAX_DELAY_SECONDS = float(os.getenv("RETRY_MAX_DELAY_SECONDS", "60"))

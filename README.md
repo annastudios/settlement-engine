@@ -7,8 +7,9 @@ rails are never overloaded, and reconciled at the end of the day to prove that
 no payment was lost or processed twice.
 
 > Work in progress. Payments are submitted, queued, and sent by workers to
-> a simulated rail that settles, rejects, fails and loses answers. Retries
-> come next.
+> a simulated rail that settles, rejects, fails and loses answers. Failed
+> sends are retried with backoff; payments that keep failing land in a
+> repair queue. Crash recovery comes next.
 
 ## Design in one line
 
@@ -45,7 +46,9 @@ change, reset the dev database with `docker compose down -v`.
 | Endpoint | What it does |
 |---|---|
 | `POST /payments` | Submit a payment. **201** new, **200** if this exact payment was already submitted, **409** if its UETR belongs to a different payment, **422** if invalid. |
-| `GET /payments/{uetr}` | Look up a payment. |
+| `GET /payments/{uetr}` | Look up a payment, including `attempts` and `last_error`. |
+| `GET /repair-queue` | Payments that ran out of attempts, oldest first. |
+| `POST /payments/{uetr}/resubmit` | Give a payment in the repair queue a fresh set of attempts. **409** if it isn't in the repair queue. |
 | `GET /health` | Postgres and Redis status; **503** if either is down. |
 
 A payment is loosely modelled on ISO 20022 pacs.008:
@@ -79,7 +82,14 @@ copies of a payment arriving at the same instant store exactly one (see
 A new payment is stored in Postgres, then its UETR is pushed onto a Redis
 queue. Workers (`python -m settlement.worker`) take payments off the queue:
 
-`received` → `processing` → `settled` or `rejected`
+```
+received ──► processing ──► settled
+                 │    ▲  └─► rejected            (final: e.g. AC04 closed account)
+     unavailable │    │ due
+                 ▼    │
+              retrying ──► in_repair ──resubmit──► retrying
+                   (after MAX_ATTEMPTS)
+```
 
 - **Atomic claim with a lease.** One Lua script pops the next payment *and*
   records a lease (deadline + owning worker) in a single step, so two workers
@@ -88,10 +98,11 @@ queue. Workers (`python -m settlement.worker`) take payments off the queue:
 - **Postgres guard.** A worker only starts a payment whose status is still
   `received` (a conditional `UPDATE`). Redis decides *who* works on a payment;
   Postgres guarantees it happens *once*, even if a UETR is queued twice.
-- **Failures don't lose payments.** If processing fails, the lease is kept and
-  the payment stays `processing`; recovering expired leases is a later step.
-  If Redis is down at submission, the payment is still accepted (it is safe in
-  Postgres) and waits in `received`.
+- **Failures don't lose payments.** If processing fails unexpectedly (a bug,
+  Postgres down), the lease is kept and the payment stays `processing`;
+  recovering expired leases is a later step. If Redis is down at submission,
+  the payment is still accepted (it is safe in Postgres) and waits in
+  `received`.
 
 Proven by `test_concurrent_workers_never_claim_the_same_payment` (8 workers
 racing for 300 payments: none claimed twice, none missed).
@@ -117,7 +128,29 @@ The worker's rail client turns every answer into one of three outcomes:
 - **settled** → `settled`
 - **rejected** → `rejected` with the reason code. Final: never resent.
 - **unavailable** (5xx, timeout after `RAIL_TIMEOUT_SECONDS`, connection
-  refused) → the payment stays `processing` with its lease kept. It must be
-  resent **with the same UETR**, never as a new payment: if the first attempt
-  actually settled, the rail's dedupe makes the resend harmless
-  (`test_resending_after_a_lost_answer_moves_the_money_once`).
+  refused) → retried (below). It is resent **with the same UETR**, never as
+  a new payment: if the first attempt actually settled, the rail's dedupe
+  makes the resend harmless
+  (`test_lost_answer_is_resolved_by_the_retry_without_paying_twice`).
+
+## Retries and the repair queue
+
+When the rail is unavailable the payment moves to `retrying` and waits
+before its next attempt:
+
+- **Exponential backoff:** about 1s, 2s, 4s, 8s ... (`RETRY_BASE_SECONDS`,
+  capped at `RETRY_MAX_DELAY_SECONDS`), so a struggling rail gets room to
+  recover.
+- **Jitter:** each wait is a random 50-100% of that, so workers that failed
+  together (the rail went down for everyone) don't all retry at the same
+  moment.
+- The wait lives in a Redis sorted set (`payments:delayed`, scored by due
+  time from Redis's clock). The claim script first moves due retries back to
+  the queue, then claims, in one atomic step, so no extra process is needed.
+
+After `MAX_ATTEMPTS` sends (default 5) the payment moves to `in_repair`, the
+repair queue (dead-letter queue), with `last_error` saying why. Ops list it
+with `GET /repair-queue` and, once the problem is fixed, give it a fresh set
+of attempts with `POST /payments/{uetr}/resubmit`. That is safe even if an
+earlier attempt did go through: the same UETR is resent and the rail
+dedupes it.

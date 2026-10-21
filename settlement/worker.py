@@ -16,7 +16,8 @@ import redis
 from sqlalchemy import update
 from sqlalchemy.orm import Session
 
-from settlement import connections, work_queue
+from settlement import config, connections, work_queue
+from settlement.backoff import backoff_seconds
 from settlement.models import Payment
 from settlement.rail_client import RailRejected, RailUnavailable, send_to_rail
 from settlement.schemas import PaymentStatus
@@ -29,53 +30,100 @@ def process_one(
     worker_id: str,
     send: Callable[[Payment], None] = send_to_rail,
 ) -> str | None:
-    """Claim and process the next payment. Returns its UETR, or None if the
-    queue is empty.
+    """Claim and process the next payment. Returns its UETR, or None if
+    nothing is ready.
 
-    A rejection is a final outcome, so the lease is released. Any other
-    failure (e.g. RailUnavailable) raises and the lease is NOT released, so
-    the payment is not lost: it stays leased until it is retried.
+    Settled, rejected and in_repair are final for now, so the lease is
+    released. A payment to retry is parked in Redis until its retry is due.
+    Anything unexpected (a bug, Postgres down) raises and the lease is NOT
+    released, so the payment is not lost.
     """
     uetr = work_queue.claim(r, worker_id)
     if uetr is None:
         return None
     with connections.SessionLocal() as session:
-        _process(session, uuid.UUID(uetr), send)
-    work_queue.ack(r, uetr, worker_id)
+        retry_in = _process(session, uuid.UUID(uetr), send)
+    if retry_in is None:
+        work_queue.ack(r, uetr, worker_id)
+    else:
+        work_queue.retry_later(r, uetr, worker_id, retry_in)
     return uetr
 
 
-def _process(session: Session, uetr: uuid.UUID, send: Callable[[Payment], None]) -> None:
-    # Postgres guard: only a payment that is still 'received' may start.
+def _process(
+    session: Session, uetr: uuid.UUID, send: Callable[[Payment], None]
+) -> float | None:
+    """Send the payment to the rail and record the outcome. Returns how many
+    seconds to wait before retrying, or None if there is nothing to retry."""
+    # Postgres guard: only a payment waiting for an attempt may start.
     # Redis decides who works on a payment; this makes sure it happens once,
     # even if the same UETR was somehow queued or handed out twice.
-    started = _move(session, uetr, PaymentStatus.RECEIVED, PaymentStatus.PROCESSING)
+    started = _move(
+        session, uetr, (PaymentStatus.RECEIVED, PaymentStatus.RETRYING),
+        PaymentStatus.PROCESSING, attempts=Payment.attempts + 1,
+    )
     if not started:
         log.info("payment %s is not waiting to be processed; skipping", uetr)
-        return
+        return None
 
+    payment = session.get(Payment, uetr, populate_existing=True)
     try:
-        send(session.get(Payment, uetr))
+        send(payment)
     except RailRejected as exc:
         _move(
-            session, uetr, PaymentStatus.PROCESSING, PaymentStatus.REJECTED,
+            session, uetr, (PaymentStatus.PROCESSING,), PaymentStatus.REJECTED,
             rejection_reason=exc.reason,
         )
         log.info("payment %s rejected by the rail: %s", uetr, exc.reason)
-        return
+        return None
+    except RailUnavailable as exc:
+        # Outcome unknown: the next attempt resends the same UETR, which the
+        # rail dedupes, so it can't move the money twice.
+        return _after_unavailable(session, payment, str(exc))
 
-    _move(session, uetr, PaymentStatus.PROCESSING, PaymentStatus.SETTLED)
-    log.info("payment %s settled", uetr)
+    _move(session, uetr, (PaymentStatus.PROCESSING,), PaymentStatus.SETTLED, last_error=None)
+    log.info("payment %s settled (attempt %d)", uetr, payment.attempts)
+    return None
+
+
+def _after_unavailable(session: Session, payment: Payment, error: str) -> float | None:
+    if payment.attempts >= config.MAX_ATTEMPTS:
+        _move(
+            session, payment.uetr, (PaymentStatus.PROCESSING,), PaymentStatus.IN_REPAIR,
+            last_error=error,
+        )
+        log.warning(
+            "payment %s moved to the repair queue after %d attempts: %s",
+            payment.uetr, payment.attempts, error,
+        )
+        return None
+
+    _move(
+        session, payment.uetr, (PaymentStatus.PROCESSING,), PaymentStatus.RETRYING,
+        last_error=error,
+    )
+    delay = backoff_seconds(
+        payment.attempts, config.RETRY_BASE_SECONDS, config.RETRY_MAX_DELAY_SECONDS
+    )
+    log.warning(
+        "rail unavailable for payment %s (attempt %d of %d), retrying in %.1fs: %s",
+        payment.uetr, payment.attempts, config.MAX_ATTEMPTS, delay, error,
+    )
+    return delay
 
 
 def _move(
-    session: Session, uetr: uuid.UUID, from_status: str, to_status: str, **changes
+    session: Session,
+    uetr: uuid.UUID,
+    from_statuses: tuple[str, ...],
+    to_status: str,
+    **changes,
 ) -> bool:
     """Change the status (and any other columns in changes) only if it is
-    currently from_status. True if it changed."""
+    currently one of from_statuses. True if it changed."""
     result = session.execute(
         update(Payment)
-        .where(Payment.uetr == uetr, Payment.status == from_status)
+        .where(Payment.uetr == uetr, Payment.status.in_(from_statuses))
         .values(status=to_status, **changes)
     )
     session.commit()
@@ -87,7 +135,7 @@ def run(
     poll_seconds: float = 0.2,
     stop: threading.Event | None = None,
 ) -> None:
-    """Process payments until stop is set. Waits poll_seconds when the queue is empty."""
+    """Process payments until stop is set. Waits poll_seconds when nothing is ready."""
     worker_id = worker_id or f"{socket.gethostname()}-{os.getpid()}"
     stop = stop or threading.Event()
     log.info("worker %s started", worker_id)
@@ -95,11 +143,6 @@ def run(
         try:
             if process_one(connections.redis_client, worker_id) is None:
                 stop.wait(poll_seconds)
-        except RailUnavailable as exc:
-            # Expected now and then: one line, not a stack trace, so real
-            # bugs stand out in the log.
-            log.warning("rail unavailable, payment kept for retry: %s", exc)
-            stop.wait(poll_seconds)
         except Exception:
             # One bad payment or a brief Redis/Postgres outage must not kill
             # the worker. Log it, pause, carry on.
