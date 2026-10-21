@@ -12,6 +12,8 @@ import pytest  # noqa: E402
 from fastapi.testclient import TestClient  # noqa: E402
 from sqlalchemy import create_engine, make_url, text  # noqa: E402
 
+import rail_sim.main  # noqa: E402
+from settlement import rail_client  # noqa: E402
 from settlement.connections import engine, redis_client  # noqa: E402
 from settlement.main import app  # noqa: E402
 from settlement.models import Base  # noqa: E402
@@ -53,3 +55,14 @@ def _empty_tables():
 @pytest.fixture
 def client():
     return TestClient(app)
+
+
+@pytest.fixture(autouse=True)
+def rail(monkeypatch):
+    """The rail simulator, running in-process: workers reach it without a
+    server. Each test starts with an empty ledger and no chaos. Tests use
+    the returned client to read the rail's ledger or set chaos."""
+    rail_sim.main.reset()
+    rail_test_client = TestClient(rail_sim.main.app)
+    monkeypatch.setattr(rail_client, "_client", rail_test_client)
+    return rail_test_client

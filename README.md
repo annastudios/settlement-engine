@@ -6,8 +6,9 @@ Faster Payments and SEPA, retried safely when a rail fails, rate-limited so the
 rails are never overloaded, and reconciled at the end of the day to prove that
 no payment was lost or processed twice.
 
-> Work in progress. Payments are submitted, queued and processed by
-> workers; the rail simulator (real failures) comes next.
+> Work in progress. Payments are submitted, queued, and sent by workers to
+> a simulated rail that settles, rejects, fails and loses answers. Retries
+> come next.
 
 ## Design in one line
 
@@ -25,8 +26,14 @@ python -m venv .venv
 .venv\Scripts\activate               # Windows; on macOS/Linux: source .venv/bin/activate
 pip install -r requirements-dev.txt
 pytest -v
-uvicorn settlement.main:app --reload # then open http://localhost:8000/docs
-python -m settlement.worker          # in another terminal; run several for more workers
+```
+
+Then, each in its own terminal (with the venv activated):
+
+```bash
+uvicorn rail_sim.main:app --port 9000  # the simulated payment rail
+uvicorn settlement.main:app --reload   # the API: http://localhost:8000/docs
+python -m settlement.worker            # a worker; run several for more
 ```
 
 Tests use a separate `settlement_test` database (created automatically), so
@@ -72,7 +79,7 @@ copies of a payment arriving at the same instant store exactly one (see
 A new payment is stored in Postgres, then its UETR is pushed onto a Redis
 queue. Workers (`python -m settlement.worker`) take payments off the queue:
 
-`received` → `processing` → `settled`
+`received` → `processing` → `settled` or `rejected`
 
 - **Atomic claim with a lease.** One Lua script pops the next payment *and*
   records a lease (deadline + owning worker) in a single step, so two workers
@@ -88,3 +95,29 @@ queue. Workers (`python -m settlement.worker`) take payments off the queue:
 
 Proven by `test_concurrent_workers_never_claim_the_same_payment` (8 workers
 racing for 300 payments: none claimed twice, none missed).
+
+## The rail simulator
+
+`rail_sim/` stands in for Faster Payments / SEPA: a separate service, like the
+real outside world. It settles payments, rejects payments to closed accounts
+with ISO 20022 reason code `AC04`, and **dedupes on the UETR**: a payment
+sent twice gets the original answer and moves money once.
+
+Chaos settings (`PUT /chaos`, or `RAIL_*` environment variables) make it
+misbehave on purpose:
+
+| Setting | What happens | What it means for us |
+|---|---|---|
+| `failure_rate` | `503` before anything happens | Nothing moved; safe to resend |
+| `drop_response_rate` | Settles, then hangs and answers `504` | Money moved but we never heard: **the outcome is unknown** |
+| `latency_ms` | Slow answers | |
+
+The worker's rail client turns every answer into one of three outcomes:
+
+- **settled** → `settled`
+- **rejected** → `rejected` with the reason code. Final: never resent.
+- **unavailable** (5xx, timeout after `RAIL_TIMEOUT_SECONDS`, connection
+  refused) → the payment stays `processing` with its lease kept. It must be
+  resent **with the same UETR**, never as a new payment: if the first attempt
+  actually settled, the rail's dedupe makes the resend harmless
+  (`test_resending_after_a_lost_answer_moves_the_money_once`).

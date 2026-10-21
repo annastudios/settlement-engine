@@ -18,13 +18,10 @@ from sqlalchemy.orm import Session
 
 from settlement import connections, work_queue
 from settlement.models import Payment
+from settlement.rail_client import RailRejected, RailUnavailable, send_to_rail
 from settlement.schemas import PaymentStatus
 
 log = logging.getLogger("settlement.worker")
-
-
-def send_to_rail(payment: Payment) -> None:
-    """Placeholder: always succeeds. Step 3 sends to the rail simulator."""
 
 
 def process_one(
@@ -35,8 +32,9 @@ def process_one(
     """Claim and process the next payment. Returns its UETR, or None if the
     queue is empty.
 
-    If processing raises, the lease is not released, so the payment is not
-    lost: it stays leased until recovery (step 5) hands it out again.
+    A rejection is a final outcome, so the lease is released. Any other
+    failure (e.g. RailUnavailable) raises and the lease is NOT released, so
+    the payment is not lost: it stays leased until it is retried.
     """
     uetr = work_queue.claim(r, worker_id)
     if uetr is None:
@@ -56,18 +54,29 @@ def _process(session: Session, uetr: uuid.UUID, send: Callable[[Payment], None])
         log.info("payment %s is not waiting to be processed; skipping", uetr)
         return
 
-    send(session.get(Payment, uetr))
+    try:
+        send(session.get(Payment, uetr))
+    except RailRejected as exc:
+        _move(
+            session, uetr, PaymentStatus.PROCESSING, PaymentStatus.REJECTED,
+            rejection_reason=exc.reason,
+        )
+        log.info("payment %s rejected by the rail: %s", uetr, exc.reason)
+        return
 
     _move(session, uetr, PaymentStatus.PROCESSING, PaymentStatus.SETTLED)
     log.info("payment %s settled", uetr)
 
 
-def _move(session: Session, uetr: uuid.UUID, from_status: str, to_status: str) -> bool:
-    """Change the status only if it is currently from_status. True if it changed."""
+def _move(
+    session: Session, uetr: uuid.UUID, from_status: str, to_status: str, **changes
+) -> bool:
+    """Change the status (and any other columns in changes) only if it is
+    currently from_status. True if it changed."""
     result = session.execute(
         update(Payment)
         .where(Payment.uetr == uetr, Payment.status == from_status)
-        .values(status=to_status)
+        .values(status=to_status, **changes)
     )
     session.commit()
     return result.rowcount == 1
@@ -86,6 +95,11 @@ def run(
         try:
             if process_one(connections.redis_client, worker_id) is None:
                 stop.wait(poll_seconds)
+        except RailUnavailable as exc:
+            # Expected now and then: one line, not a stack trace, so real
+            # bugs stand out in the log.
+            log.warning("rail unavailable, payment kept for retry: %s", exc)
+            stop.wait(poll_seconds)
         except Exception:
             # One bad payment or a brief Redis/Postgres outage must not kill
             # the worker. Log it, pause, carry on.
@@ -96,6 +110,7 @@ def run(
 
 if __name__ == "__main__":
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
+    logging.getLogger("httpx").setLevel(logging.WARNING)  # one line per request is noise
     stop_event = threading.Event()
     # Ctrl+C or `docker stop`: finish the current payment, then exit.
     signal.signal(signal.SIGINT, lambda *_: stop_event.set())

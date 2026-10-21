@@ -27,6 +27,8 @@ class Payment(Base):
     creditor_iban: Mapped[str] = mapped_column(String(34))
     remittance_info: Mapped[str | None] = mapped_column(String(140))
     status: Mapped[str] = mapped_column(String(16))
+    # ISO 20022 reason code when the rail rejects the payment (e.g. AC04).
+    rejection_reason: Mapped[str | None] = mapped_column(String(4))
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now()
     )

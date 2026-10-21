@@ -17,6 +17,7 @@ class PaymentStatus(StrEnum):
     RECEIVED = "received"  # stored and queued, waiting for a worker
     PROCESSING = "processing"  # a worker is sending it to the rail
     SETTLED = "settled"  # the rail accepted it: money moved
+    REJECTED = "rejected"  # the rail refused it for good; see rejection_reason
 
 
 # Each rail settles in exactly one currency.
@@ -65,4 +66,6 @@ class PaymentResponse(PaymentRequest):
     model_config = ConfigDict(from_attributes=True)
 
     status: PaymentStatus
+    # ISO 20022 reason code from the rail, e.g. AC04 = closed account.
+    rejection_reason: str | None = None
     created_at: datetime

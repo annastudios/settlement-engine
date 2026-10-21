@@ -4,6 +4,7 @@ import pytest
 
 from settlement import work_queue, worker
 from settlement.connections import redis_client as r
+from settlement.rail_client import RailUnavailable
 from tests.factories import fps_payment, payment_status
 
 
@@ -13,7 +14,7 @@ def submit(client, **overrides):
     return payment["uetr"]
 
 
-def test_worker_settles_a_submitted_payment(client):
+def test_worker_settles_a_submitted_payment(client, rail):
     uetr = submit(client)
 
     processed = worker.process_one(r, "worker-a")
@@ -21,6 +22,19 @@ def test_worker_settles_a_submitted_payment(client):
     assert processed == uetr
     assert payment_status(uetr) == "settled"
     assert r.zscore(work_queue.LEASES, uetr) is None  # lease released
+    assert rail.get(f"/payments/{uetr}").json()["status"] == "settled"
+
+
+def test_rejected_payment_is_final_with_its_reason(client):
+    uetr = submit(client, creditor_iban="GB56CLOS00000000000001")
+
+    worker.process_one(r, "worker-a")
+
+    body = client.get(f"/payments/{uetr}").json()
+    assert body["status"] == "rejected"
+    assert body["rejection_reason"] == "AC04"
+    # A rejection is a final answer, so the lease is released.
+    assert r.zscore(work_queue.LEASES, uetr) is None
 
 
 def test_settled_status_is_visible_through_the_api(client):
@@ -46,18 +60,30 @@ def test_payment_queued_twice_is_sent_to_the_rail_once(client):
     assert payment_status(uetr) == "settled"
 
 
-def test_failed_send_keeps_the_lease_so_the_payment_is_not_lost(client):
+def test_rail_outage_keeps_the_lease_so_the_payment_is_not_lost(client, rail):
     uetr = submit(client)
+    rail.put("/chaos", json={"failure_rate": 1})
 
-    def rail_down(payment):
-        raise ConnectionError("rail unreachable")
+    with pytest.raises(RailUnavailable):
+        worker.process_one(r, "worker-a")
 
-    with pytest.raises(ConnectionError):
-        worker.process_one(r, "worker-a", send=rail_down)
-
-    # Not settled, and still leased: recovery (step 5) will find it.
+    # Not settled, and still leased, so it can be retried.
     assert payment_status(uetr) == "processing"
     assert r.hget(work_queue.LEASE_OWNERS, uetr) == "worker-a"
+
+
+def test_lost_answer_leaves_payment_processing_although_the_rail_settled(client, rail):
+    # We must not mark it settled (we don't know that) nor rejected (it
+    # wasn't). It stays processing until a retry with the same UETR asks
+    # the rail again.
+    uetr = submit(client)
+    rail.put("/chaos", json={"drop_response_rate": 1, "hang_seconds": 0})
+
+    with pytest.raises(RailUnavailable):
+        worker.process_one(r, "worker-a")
+
+    assert payment_status(uetr) == "processing"
+    assert rail.get(f"/payments/{uetr}").json()["status"] == "settled"
 
 
 def test_run_loop_processes_payments_until_stopped(client):
