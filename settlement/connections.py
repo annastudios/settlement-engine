@@ -1,5 +1,6 @@
 import redis
 from sqlalchemy import create_engine
+from sqlalchemy.orm import sessionmaker
 
 from settlement import config
 
@@ -10,6 +11,7 @@ engine = create_engine(
     pool_pre_ping=True,
     connect_args={"connect_timeout": 5},
 )
+SessionLocal = sessionmaker(engine, expire_on_commit=False)
 
 redis_client = redis.Redis.from_url(
     config.REDIS_URL,

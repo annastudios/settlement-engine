@@ -1,9 +1,30 @@
-from fastapi import FastAPI, Response
+import uuid
+from contextlib import asynccontextmanager
+
+from fastapi import Depends, FastAPI, HTTPException, Response
 from sqlalchemy import text
+from sqlalchemy.orm import Session
 
 from settlement import connections
+from settlement.models import Base, Payment
+from settlement.payments import UetrConflict, submit_payment
+from settlement.schemas import PaymentRequest, PaymentResponse
 
-app = FastAPI(title="settlement-engine")
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    # Creates missing tables. It does not change existing ones: after a schema
+    # change, reset the dev database with `docker compose down -v`.
+    Base.metadata.create_all(connections.engine)
+    yield
+
+
+app = FastAPI(title="settlement-engine", lifespan=lifespan)
+
+
+def get_session():
+    with connections.SessionLocal() as session:
+        yield session
 
 
 def _check_postgres() -> str:
@@ -31,3 +52,28 @@ def health(response: Response):
     if not healthy:
         response.status_code = 503
     return {"status": "ok" if healthy else "degraded", "checks": checks}
+
+
+@app.post("/payments", response_model=PaymentResponse, status_code=201)
+def create_payment(
+    request: PaymentRequest,
+    response: Response,
+    session: Session = Depends(get_session),
+):
+    """Submit a payment. 201 when new, 200 when this exact payment was
+    already submitted, 409 when the UETR belongs to a different payment."""
+    try:
+        payment, created = submit_payment(session, request)
+    except UetrConflict as exc:
+        raise HTTPException(status_code=409, detail=str(exc))
+    if not created:
+        response.status_code = 200
+    return payment
+
+
+@app.get("/payments/{uetr}", response_model=PaymentResponse)
+def get_payment(uetr: uuid.UUID, session: Session = Depends(get_session)):
+    payment = session.get(Payment, uetr)
+    if payment is None:
+        raise HTTPException(status_code=404, detail="payment not found")
+    return payment
