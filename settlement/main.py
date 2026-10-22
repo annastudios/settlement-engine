@@ -36,13 +36,15 @@ log = logging.getLogger("settlement.api")
 
 
 class _HideDashboardPolling(logging.Filter):
-    """The dashboard asks for /stats (and an open payment's /history) every
-    second, and Prometheus reads /metrics every few seconds; keep that out of
-    the access log so the requests worth seeing aren't buried."""
+    """The dashboard polls several endpoints every second or few, and
+    Prometheus reads /metrics every few seconds; keep that out of the access
+    log so the requests worth seeing aren't buried."""
+
+    _POLLED = ("GET /stats ", "GET /metrics ", "GET /scoreboard ", "GET /demo/run ")
 
     def filter(self, record: logging.LogRecord) -> bool:
         message = record.getMessage()
-        if "GET /stats" in message or "GET /metrics" in message:
+        if any(polled in message for polled in self._POLLED):
             return False
         return not ("GET /payments/" in message and "/history" in message)
 

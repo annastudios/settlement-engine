@@ -179,6 +179,27 @@
   .promise.ok .state { color: var(--settled); }
   .promise.bad .state { color: var(--rejected); }
 
+  /* Demo story */
+  .demo-acts { display: grid; grid-template-columns: repeat(6, minmax(0, 1fr)); gap: 8px; }
+  .demo-act {
+    padding: 10px 12px; border-radius: 14px; background: var(--surface-sunk); font-size: 12px;
+    display: grid; gap: 2px; align-content: start; color: var(--muted);
+  }
+  .demo-act b { font-size: 13px; color: var(--ink); }
+  .demo-act .step { font-weight: 700; font-size: 11px; letter-spacing: .05em; text-transform: uppercase; }
+  .demo-act.done { background: var(--ok-soft); }
+  .demo-act.done .step { color: var(--settled); }
+  .demo-act.current { background: var(--pill-dark); color: color-mix(in srgb, var(--pill-dark-ink) 75%, transparent); }
+  .demo-act.current b, .demo-act.current .step { color: var(--pill-dark-ink); }
+  .narration { list-style: none; margin: 14px 0 0; padding: 0; display: grid; gap: 6px; }
+  .narration li { display: grid; grid-template-columns: 70px minmax(0, 1fr); gap: 10px; font-size: 13px; }
+  .narration li .when { color: var(--muted); font-variant-numeric: tabular-nums; font-size: 12px; }
+  .narration li:last-child { font-weight: 600; }
+  .demo-result { margin-top: 14px; }
+  #demo-start[disabled] { opacity: .6; cursor: default; }
+  @media (max-width: 960px) { .demo-acts { grid-template-columns: repeat(3, minmax(0, 1fr)); } }
+  @media (max-width: 560px) { .demo-acts { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
+
   /* Status tiles */
   .tiles { display: grid; grid-template-columns: repeat(6, minmax(0, 1fr)); gap: 12px; }
   .tile { padding: 14px 16px; border-radius: 16px; display: grid; gap: 2px; }
@@ -364,6 +385,7 @@
         <h2>Never lose a payment. Never pay one twice.</h2>
         <p>Checked live against the payment network's own records while you break things below.</p>
         <div class="hero-chips">
+          <button class="btn primary" id="demo-start">▶ Run the 90-second demo</button>
           <a class="chip" href="#repair" id="chip-repair">Needs a person <b id="needs-person">0</b></a>
           <span class="chip">Resends absorbed <b id="resends">0</b></span>
         </div>
@@ -388,6 +410,19 @@
           <div class="what">In flight, idle 2+ minutes, nothing will pick it up</div>
         </div>
       </div>
+    </section>
+
+    <section class="card" id="demo-card" hidden>
+      <div class="card-head">
+        <div>
+          <h2>The demo story</h2>
+          <div class="sub" id="demo-sub"></div>
+        </div>
+        <button class="btn small" id="demo-stop">Stop the demo</button>
+      </div>
+      <div class="demo-acts" id="demo-acts"></div>
+      <ol class="narration" id="demo-log"></ol>
+      <div class="demo-result" id="demo-result"></div>
     </section>
 
     <section class="tiles" id="tiles" aria-label="Payments by status"></section>
@@ -852,10 +887,61 @@ async function runReconciliation() {
 
 document.getElementById("recon-run").addEventListener("click", runReconciliation);
 
+// --- the one-click demo ---------------------------------------------------------
+
+async function refreshDemo() {
+  let status;
+  try {
+    const response = await fetch("/demo/run");
+    if (!response.ok) return;
+    status = await response.json();
+  } catch {
+    return;
+  }
+  const card = document.getElementById("demo-card");
+  const start = document.getElementById("demo-start");
+  start.disabled = status.running;
+  start.textContent = status.running ? "Demo running..." : "▶ Run the 90-second demo";
+  document.getElementById("demo-stop").hidden = !status.running;
+  if (!status.running && !status.log.length) {
+    card.hidden = true;
+    return;
+  }
+  card.hidden = false;
+  const current = status.acts.find(a => a.state === "current");
+  document.getElementById("demo-sub").textContent = status.running
+    ? `Act ${current ? current.number : 1} of 6, playing on the live system. Watch the scoreboard stay at 0.`
+    : status.error ? "Stopped with an error." : "Finished.";
+  document.getElementById("demo-acts").replaceChildren(...status.acts.map(a => el("div", { class: `demo-act ${a.state}` },
+    el("span", { class: "step" }, a.state === "done" ? `Act ${a.number} ✓` : a.state === "current" ? `Act ${a.number} · now` : `Act ${a.number}`),
+    el("b", {}, a.title),
+    el("span", {}, a.description))));
+  document.getElementById("demo-log").replaceChildren(...status.log.slice(-7).map(entry => el("li", {},
+    el("span", { class: "when" }, new Date(entry.at).toLocaleTimeString(undefined, { hour12: false })),
+    el("span", {}, entry.text))));
+  const result = status.result;
+  document.getElementById("demo-result").replaceChildren(...(result ? [el("div", { class: `verdict ${result.balanced ? "ok" : "bad"}` },
+    result.balanced
+      ? `Story complete: reconciliation balanced, ${result.matched} payments match, ${result.resends_absorbed} resends absorbed by the network.`
+      : `Story complete with ${result.breaks} reconciliation break(s).`)] : []));
+}
+
+document.getElementById("demo-start").addEventListener("click", async () => {
+  await fetch("/demo/run", { method: "POST" });
+  refreshDemo();
+  document.getElementById("demo-card").scrollIntoView({ behavior: "smooth", block: "start" });
+});
+document.getElementById("demo-stop").addEventListener("click", async () => {
+  await fetch("/demo/run/stop", { method: "POST" });
+  refreshDemo();
+});
+
 refresh();
 refreshScoreboard();
+refreshDemo();
 setInterval(refresh, 1000);
 setInterval(refreshScoreboard, 3000);
+setInterval(refreshDemo, 1000);
 </script>
 </body>
 </html>

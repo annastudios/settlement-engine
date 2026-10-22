@@ -78,6 +78,34 @@ again to watch crash recovery.
 The `/demo/...` endpoints behind those buttons are for local development
 and demos only.
 
+### One-click demo
+
+**▶ Run the 90-second demo** (top of the dashboard, or `POST /demo/run`)
+plays a scripted story on the live system while a panel narrates it:
+
+1. **A normal day**: 40 payments flow in and settle
+2. **The network gets flaky**: 30% of sends fail; they retry and settle
+3. **A worker crashes mid-payment**: a demo worker is killed while sending;
+   its claim runs out and another worker finishes the payment
+4. **The network goes down**: 5 payments run out of attempts and land in
+   the repair queue
+5. **Ops fixes it**: the network comes back and those 5 are resubmitted
+6. **End of day**: reconciliation against the network's records
+
+It starts two worker processes of its own so act 3 is a real crash, and
+whatever happens it stops them and puts the network back to healthy.
+A live run:
+
+```
+Killed demo worker A while it was sending £4,590.20 from Alice Smith to City Council Tax.
+Its claim ran out and the payment was picked up again: settled on attempt 2.
+All 5 ran out of attempts and are in the repair queue, waiting for a person.
+All 5 settled. Same IDs, so nothing could be paid twice.
+Reconciliation: Balanced: all 601 of today's payments match the network's records.
+```
+
+Follow it with `GET /demo/run`; stop it with `POST /demo/run/stop`.
+
 Tests use a separate `settlement_test` database (created automatically), so
 they never touch your dev data. Tables are created on startup; after a schema
 change, reset the dev database with `docker compose down -v`.
@@ -98,6 +126,7 @@ change, reset the dev database with `docker compose down -v`.
 | `GET /scoreboard` | The promises checked live: lost, sent twice, stuck, needs a person. |
 | `POST /demo/payments?count=N` | Submit N random test payments (1-200). Dev/demo only. |
 | `PUT /demo/chaos` | Change the rail simulator's behaviour. Dev/demo only. |
+| `POST /demo/run`, `GET /demo/run`, `POST /demo/run/stop` | Start, follow and stop the one-click demo story. **409** if it is already running. Dev/demo only. |
 | `PUT /demo/rate-limits` | Change a rail's rate limit for all workers, e.g. `{"rail": "FPS", "per_second": 5}`. Dev/demo only. |
 
 A payment is loosely modelled on ISO 20022 pacs.008:

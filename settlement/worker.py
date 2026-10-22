@@ -140,6 +140,14 @@ def _after_unavailable(
     return delay
 
 
+def default_worker_id() -> str:
+    """WORKER_ID if set (whoever started the worker chose its name), else
+    computer name + process id. A process starting a worker can't rely on
+    the id it sees: on Windows a virtual environment's python.exe is a
+    launcher that runs the real Python as a child with a different id."""
+    return os.getenv("WORKER_ID") or f"{socket.gethostname()}-{os.getpid()}"
+
+
 def run(
     worker_id: str | None = None,
     poll_seconds: float = 0.2,
@@ -147,7 +155,7 @@ def run(
 ) -> None:
     """Process payments until stop is set. Waits poll_seconds when nothing is
     ready, and runs crash recovery every RECOVERY_INTERVAL_SECONDS."""
-    worker_id = worker_id or f"{socket.gethostname()}-{os.getpid()}"
+    worker_id = worker_id or default_worker_id()
     stop = stop or threading.Event()
     next_recovery = 0.0
     log.info("worker %s started", worker_id)
