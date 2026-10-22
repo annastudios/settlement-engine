@@ -1,135 +1,109 @@
-# settlement-engine
+# Settlement Engine
 
-A payment processing engine in the style of a bank's back office: payment
-instructions are accepted, queued, sent to (simulated) payment rails such as
-Faster Payments and SEPA, retried safely when a rail fails, rate-limited so the
-rails are never overloaded, and reconciled at the end of the day to prove that
-no payment was lost or processed twice.
+[![Tests](https://github.com/annastudios/settlement-engine/actions/workflows/tests.yml/badge.svg)](https://github.com/annastudios/settlement-engine/actions/workflows/tests.yml)
 
-> Work in progress. Payments are submitted, queued, and sent by workers to
-> a simulated rail that settles, rejects, fails and loses answers. Failed
-> sends are retried with backoff, payments that keep failing land in a
-> repair queue, payments left behind by crashed workers (or lost by Redis)
-> are recovered, each rail has a rate limit shared by all workers, and
-> every change is recorded in an append-only audit trail, an end-of-day
-> reconciliation compares our ledger with the network's records, and
-> Prometheus + Grafana graph it all.
+A bank-style payment engine: it accepts payment instructions, sends them to
+simulated payment networks (Faster Payments, SEPA), and keeps working when
+networks fail, workers crash or replies get lost, without ever **losing** a
+payment or **paying one twice**.
 
-## Design in one line
+## What it guarantees
 
-**Postgres holds the money truth** (payments and an append-only audit trail).
-**Redis only coordinates work** (queue, leases, retries, rate limits). If Redis
-is wiped, nothing is lost: the queue can be rebuilt from Postgres.
+- **Never paid twice.** Every payment has a unique ID (UETR). Duplicates are
+  stored once, and resends after a failure reuse the same ID, which the
+  network deduplicates.
+- **Never lost.** Postgres is the source of truth; Redis only coordinates work.
+  Crashed workers and even a wiped Redis are recovered from Postgres.
+- **Never stuck silently.** Payments that keep failing go to a repair queue
+  with the reason, for a person to resubmit.
+- **Provable.** An append-only audit trail and an end-of-day reconciliation
+  against the network's own records.
 
-## Run it locally
+## How it works
+
+```
+client ──► API (FastAPI) ──► Postgres (ledger + audit trail)
+                │
+                └──► Redis queue ──► workers ──► payment network (simulated)
+```
+
+- **Idempotency:** the UETR is the primary key; `INSERT … ON CONFLICT` lets
+  Postgres decide atomically, so even simultaneous duplicates store one row.
+- **Atomic claim:** a Redis Lua script takes a payment *and* records an owned,
+  time-limited lease in one step, so two workers can't take the same one.
+- **Exactly-once effect:** a worker only starts a payment whose status is still
+  waiting (a compare-and-swap `UPDATE`), even if Redis hands it out twice.
+- **Retries:** capped exponential backoff with jitter (≈1, 2, 4, 8 s…); after 5
+  attempts the payment moves to the repair queue (dead-letter queue).
+- **Crash recovery:** expired leases are reclaimed atomically; payments missing
+  from Redis are re-queued from Postgres; a payment that crashes workers every
+  time ends in repair instead of looping.
+- **Rate limits:** each network has a per-second limit shared by all workers
+  (GCRA slot booking in Redis); over-limit payments wait for their slot without
+  blocking other networks.
+- **Audit trail:** every status change and its history row are written in one
+  transaction; a Postgres trigger refuses any edit or delete.
+- **Reconciliation:** compares our ledger with the network's records, payment by
+  payment, and flags every disagreement.
+- **Metrics:** Prometheus counters (derived from the audit trail) and a
+  ready-made Grafana dashboard.
+
+## Try it
 
 Requires Python 3.13 and Docker.
 
 ```bash
-docker compose up -d                 # Postgres + Redis
+docker compose up -d                   # Postgres + Redis
 python -m venv .venv
-.venv\Scripts\activate               # Windows; on macOS/Linux: source .venv/bin/activate
+.venv\Scripts\activate                 # macOS/Linux: source .venv/bin/activate
 pip install -r requirements-dev.txt
-pytest -v
+pytest                                 # 178 tests, against real Postgres and Redis
 ```
 
-Then, each in its own terminal (with the venv activated):
+Then, each in its own terminal:
 
 ```bash
-uvicorn rail_sim.main:app --port 9000  # the simulated payment rail
-uvicorn settlement.main:app --reload   # the API: http://localhost:8000/docs
-python -m settlement.worker            # a worker; run several for more
+uvicorn rail_sim.main:app --port 9000  # simulated payment network
+uvicorn settlement.main:app            # API: http://127.0.0.1:8000/docs
+python -m settlement.worker            # a worker (run several for more)
 ```
 
-Then open the **live dashboard** at http://localhost:8000/dashboard.
+Open the **live dashboard** at http://127.0.0.1:8000/dashboard. It shows a
+live scoreboard (*lost · sent twice · stuck*, all checked against the
+network's records), payments moving through their states, rate limits, the
+repair queue, and each payment's full history in one click. Buttons make the
+network healthy, flaky, down, or lose its replies.
 
-## Live dashboard
+For Grafana graphs: `docker compose --profile metrics up -d`, then
+http://127.0.0.1:3000.
 
-`/dashboard` refreshes every second and shows:
+### The 90-second demo
 
-- **The promises, checked live** at the top (`GET /scoreboard`):
-  - **Lost**: payments where we and the network disagree, from a live
-    reconciliation of today (payments still in flight here are left out,
-    since a worker or retry is about to settle the question)
-  - **Sent twice**: payments the network settled more than once, from the
-    network's own records, next to how many resends its dedupe absorbed
-  - **Stuck**: in-flight payments idle for 2+ minutes that nothing will
-    pick up (no live claim, not waiting in Redis)
-  - plus how many payments need a person (the repair queue)
-- How many payments are in each state, and payments settled per second
-  over the last minute
-- Each rail's actual speed next to its rate limit, how many payments are
-  waiting for a rate-limit slot, and buttons to change the limit
-- What Redis holds right now: waiting in the queue, being worked on (which
-  worker holds which payment, and how long its lease has left), waiting to
-  retry
-- The repair queue, with a **Resubmit** button per payment
-- Recent payments, each row flashing when its status changes; click one to
-  open its life story (the audit trail) in a side panel
-- End-of-day reconciliation, run with one button
-
-Buttons send batches of random FPS/SEPA payments (about 1 in 10 FPS ones to
-a closed account) and switch the rail simulator between **Healthy**,
-**Flaky** (30% of sends fail), **Down** and **Loses answers** (settles, then
-the answer is lost), so retries, the repair queue and recovery can be
-watched as they happen. Kill a worker with Ctrl+C mid-batch and start it
-again to watch crash recovery.
-
-The `/demo/...` endpoints behind those buttons are for local development
-and demos only.
-
-### One-click demo
-
-**▶ Run the 90-second demo** (top of the dashboard, or `POST /demo/run`)
-plays a scripted story on the live system while a panel narrates it:
-
-1. **A normal day**: 40 payments flow in and settle
-2. **The network gets flaky**: 30% of sends fail; they retry and settle
-3. **A worker crashes mid-payment**: a demo worker is killed while sending;
-   its claim runs out and another worker finishes the payment
-4. **The network goes down**: 5 payments run out of attempts and land in
-   the repair queue
-5. **Ops fixes it**: the network comes back and those 5 are resubmitted
-6. **End of day**: reconciliation against the network's records
-
-It starts two worker processes of its own so act 3 is a real crash, and
-whatever happens it stops them and puts the network back to healthy.
-A live run:
+**▶ Run the 90-second demo** on the dashboard plays a narrated story on the
+live system: payments flow, the network gets flaky, a worker is **killed
+mid-payment**, the network goes down and payments land in the repair queue,
+ops resubmits them, and the day ends with reconciliation. From a real run:
 
 ```
 Killed demo worker A while it was sending £4,590.20 from Alice Smith to City Council Tax.
 Its claim ran out and the payment was picked up again: settled on attempt 2.
-All 5 ran out of attempts and are in the repair queue, waiting for a person.
 All 5 settled. Same IDs, so nothing could be paid twice.
 Reconciliation: Balanced: all 601 of today's payments match the network's records.
 ```
 
-Follow it with `GET /demo/run`; stop it with `POST /demo/run/stop`.
-
-Tests use a separate `settlement_test` database (created automatically), so
-they never touch your dev data. Tables are created on startup; after a schema
-change, reset the dev database with `docker compose down -v`.
-
 ## API
 
-| Endpoint | What it does |
+| Endpoint | |
 |---|---|
-| `POST /payments` | Submit a payment. **201** new, **200** if this exact payment was already submitted, **409** if its UETR belongs to a different payment, **422** if invalid. |
-| `GET /payments/{uetr}` | Look up a payment, including `attempts` and `last_error`. |
-| `GET /payments/{uetr}/history` | The payment's audit trail: every change, who made it and why. |
-| `GET /repair-queue` | Payments that ran out of attempts, oldest first. |
-| `GET /reconciliation?day=YYYY-MM-DD` | End-of-day reconciliation against the network's records (default today, UTC). **503** if the network can't be reached. |
-| `POST /payments/{uetr}/resubmit` | Give a payment in the repair queue a fresh set of attempts. **409** if it isn't in the repair queue. |
-| `GET /health` | Postgres and Redis status; **503** if either is down. |
-| `GET /dashboard` | The live dashboard page. |
-| `GET /stats` | Everything the dashboard shows, as JSON. |
-| `GET /scoreboard` | The promises checked live: lost, sent twice, stuck, needs a person. |
-| `POST /demo/payments?count=N` | Submit N random test payments (1-200). Dev/demo only. |
-| `PUT /demo/chaos` | Change the rail simulator's behaviour. Dev/demo only. |
-| `POST /demo/run`, `GET /demo/run`, `POST /demo/run/stop` | Start, follow and stop the one-click demo story. **409** if it is already running. Dev/demo only. |
-| `PUT /demo/rate-limits` | Change a rail's rate limit for all workers, e.g. `{"rail": "FPS", "per_second": 5}`. Dev/demo only. |
+| `POST /payments` | Submit a payment. **201** new, **200** repeat of the same payment, **409** UETR reused for a different one |
+| `GET /payments/{uetr}` | A payment, with attempts and last error |
+| `GET /payments/{uetr}/history` | Its audit trail: every change, who made it and why |
+| `GET /repair-queue`, `POST /payments/{uetr}/resubmit` | Payments needing a person, and giving one a fresh start |
+| `GET /reconciliation` | Today's reconciliation against the network's records |
+| `GET /health`, `GET /metrics` | Health check, Prometheus metrics |
 
-A payment is loosely modelled on ISO 20022 pacs.008:
+Full interactive docs at `/docs` when running. A payment looks like this
+(loosely ISO 20022 pacs.008):
 
 ```json
 {
@@ -140,234 +114,13 @@ A payment is loosely modelled on ISO 20022 pacs.008:
   "debtor_name": "Alice Smith",
   "debtor_iban": "GB33BUKB20201555555555",
   "creditor_name": "Bob's Bakery Ltd",
-  "creditor_iban": "GB82WEST12345698765432",
-  "remittance_info": "Invoice 1042"
+  "creditor_iban": "GB82WEST12345698765432"
 }
 ```
 
-Validation: IBANs pass the ISO 13616 mod-97 checksum; FPS is GBP only, up
-to £1,000,000, to a UK IBAN; SEPA is EUR only; amounts are positive with at
-most 2 decimal places and are stored as `NUMERIC`, never float; text fields
-follow ISO 20022's 140-character limit.
+## Built with
 
-**Idempotency:** the UETR is the primary key, and submissions use
-`INSERT ... ON CONFLICT DO NOTHING`, so Postgres decides atomically. Even 10
-copies of a payment arriving at the same instant store exactly one (see
-`test_concurrent_duplicates_create_exactly_one_payment`).
+Python 3.13 · FastAPI · PostgreSQL · SQLAlchemy · Redis (Lua scripts) ·
+Docker Compose · Prometheus · Grafana · pytest · GitHub Actions
 
-## Processing
-
-A new payment is stored in Postgres, then its UETR is pushed onto a Redis
-queue. Workers (`python -m settlement.worker`) take payments off the queue:
-
-```
-received ──► processing ──► settled
-                 │    ▲  └─► rejected            (final: e.g. AC04 closed account)
-     unavailable │    │ due
-                 ▼    │
-              retrying ──► in_repair ──resubmit──► retrying
-                   (after MAX_ATTEMPTS)
-```
-
-- **Atomic claim with a lease.** One Lua script pops the next payment *and*
-  records a lease (deadline + owning worker) in a single step, so two workers
-  can never claim the same payment. The deadline uses Redis's clock, not the
-  worker's. Only the lease owner can release it.
-- **Postgres guard.** A worker only starts a payment whose status is still
-  `received` (a conditional `UPDATE`). Redis decides *who* works on a payment;
-  Postgres guarantees it happens *once*, even if a UETR is queued twice.
-- **Failures don't lose payments.** If processing fails unexpectedly (a bug,
-  Postgres down), the lease is kept and the payment stays `processing` until
-  crash recovery (below) picks it up. If Redis is down at submission, the
-  payment is still accepted (it is safe in Postgres) and recovery queues it
-  later.
-
-Proven by `test_concurrent_workers_never_claim_the_same_payment` (8 workers
-racing for 300 payments: none claimed twice, none missed).
-
-## The rail simulator
-
-`rail_sim/` stands in for Faster Payments / SEPA: a separate service, like the
-real outside world. It settles payments, rejects payments to closed accounts
-with ISO 20022 reason code `AC04`, and **dedupes on the UETR**: a payment
-sent twice gets the original answer and moves money once.
-
-Chaos settings (`PUT /chaos`, or `RAIL_*` environment variables) make it
-misbehave on purpose:
-
-| Setting | What happens | What it means for us |
-|---|---|---|
-| `failure_rate` | `503` before anything happens | Nothing moved; safe to resend |
-| `drop_response_rate` | Settles, then hangs and answers `504` | Money moved but we never heard: **the outcome is unknown** |
-| `latency_ms` | Slow answers | |
-
-The worker's rail client turns every answer into one of three outcomes:
-
-- **settled** → `settled`
-- **rejected** → `rejected` with the reason code. Final: never resent.
-- **unavailable** (5xx, timeout after `RAIL_TIMEOUT_SECONDS`, connection
-  refused) → retried (below). It is resent **with the same UETR**, never as
-  a new payment: if the first attempt actually settled, the rail's dedupe
-  makes the resend harmless
-  (`test_lost_answer_is_resolved_by_the_retry_without_paying_twice`).
-
-## Retries and the repair queue
-
-When the rail is unavailable the payment moves to `retrying` and waits
-before its next attempt:
-
-- **Exponential backoff:** about 1s, 2s, 4s, 8s ... (`RETRY_BASE_SECONDS`,
-  capped at `RETRY_MAX_DELAY_SECONDS`), so a struggling rail gets room to
-  recover.
-- **Jitter:** each wait is a random 50-100% of that, so workers that failed
-  together (the rail went down for everyone) don't all retry at the same
-  moment.
-- The wait lives in a Redis sorted set (`payments:delayed`, scored by due
-  time from Redis's clock). The claim script first moves due retries back to
-  the queue, then claims, in one atomic step, so no extra process is needed.
-
-After `MAX_ATTEMPTS` sends (default 5) the payment moves to `in_repair`, the
-repair queue (dead-letter queue), with `last_error` saying why. Ops list it
-with `GET /repair-queue` and, once the problem is fixed, give it a fresh set
-of attempts with `POST /payments/{uetr}/resubmit`. That is safe even if an
-earlier attempt did go through: the same UETR is resent and the rail
-dedupes it.
-
-## Crash recovery
-
-Every worker runs a recovery pass every `RECOVERY_INTERVAL_SECONDS` (10s),
-so there is no extra process to forget to start. It handles:
-
-| What happened | How it's spotted | What recovery does |
-|---|---|---|
-| A worker died (or stalled) holding a payment | Its lease passed `LEASE_SECONDS` (30s) | `processing` → `retrying` and re-queued; resent with the same UETR, so a send that secretly went through isn't paid twice |
-| A worker died after finishing, before releasing its lease | Lease expired, payment already final | Lease cleaned up; **not** resent |
-| A payment never reached Redis, or Redis was wiped | In flight in Postgres, unchanged for `ORPHAN_AFTER_SECONDS` (60s), unknown to Redis | Re-queued from Postgres |
-
-- A crashed attempt still counts as an attempt, so a "poison" payment that
-  crashes the worker every time ends in the repair queue instead of looping
-  forever.
-- Running it on many workers at once is safe: taking expired leases is one
-  atomic Lua step (each goes to exactly one worker), and a payment queued
-  twice is skipped by the Postgres guard.
-- A payment changed recently (`updated_at`) is never treated as lost, so one
-  a worker is handling right now is left alone.
-
-This is what makes "Redis only coordinates" true:
-`test_whole_queue_is_rebuilt_from_postgres_after_redis_is_wiped` empties
-Redis completely and every payment still settles, each sent once.
-
-## Rate limits
-
-Each rail accepts at most N payments per second from us (`RATE_LIMIT_FPS`,
-default 10; `RATE_LIMIT_SEPA`, default 5), however many workers are running.
-The limit lives in Redis, so it is shared, and can be changed while running
-(the dashboard has buttons for it).
-
-Every payment **books the next free slot** on its rail (the GCRA algorithm,
-a close cousin of the token bucket), in one atomic Lua step:
-
-- Slot is now → sent straight away. Up to one second's worth go through as
-  a burst.
-- Slot is in the future → the payment is parked in the delayed set until
-  then, and sent without booking again when it comes back. That is not a
-  failed attempt and its status doesn't change.
-
-Because workers park over-limit payments instead of waiting for a slot, a
-busy rail never holds up the other one
-(`test_busy_rail_does_not_hold_up_the_other_rail`), and parked payments
-come back exactly at the rail's pace instead of all retrying at once.
-`test_concurrent_workers_never_book_the_same_slot` has 8 workers book 80
-slots at once: exactly 10 go now and the other 70 get their own slot, 100 ms
-apart. Live, with 3 workers and FPS limited to 5/s, a batch of 100 finished
-at 5 FPS payments per second after a one-second burst.
-
-Changing a limit applies to new bookings; slots already booked keep their
-times.
-
-## Audit trail
-
-Every change to a payment is recorded in `payment_events`: when, from which
-status to which, the attempt number, **who** made it (`api`, `worker <id>`,
-`recovery by worker <id>`, `ops`) and **why** (`rail answered 503; retrying
-in 1.3s`, `rejected by the rail: AC04`, `recovered: its worker stopped while
-holding it`, ...). See it with `GET /payments/{uetr}/history`, or click a
-payment on the dashboard.
-
-- **Written with the change, in the same transaction.** All status changes
-  go through `audit.move()`, which locks the payment row, checks its current
-  status, updates it and inserts the audit row, then commits. The change and
-  its history entry are saved together or not at all, so the trail can never
-  miss a change or describe one that didn't happen
-  (`test_after_a_messy_run_every_payment_matches_its_trail`).
-- **Append-only, enforced by Postgres.** A trigger rejects every `UPDATE` and
-  `DELETE` on `payment_events`, so history can't be rewritten even by code
-  or a person that bypasses this application.
-- Timestamps use `clock_timestamp()`, so entries written in one transaction
-  still get distinct, ordered times.
-
-Payments created before the audit trail existed have no history.
-
-## End-of-day reconciliation
-
-Tests prove the code behaves; reconciliation checks what actually happened.
-It compares our ledger with the payment network's own records (its
-`GET /ledger`, standing in for the statement file a real network sends),
-payment by payment, for one UTC day:
-
-| Group | Meaning |
-|---|---|
-| **matched** | Same final status and amount on both sides |
-| **pending** | Not finished here and not seen by the network yet (e.g. in the repair queue). Not a problem. |
-| **break** | We and the network disagree. Needs a person. |
-
-The breaks it detects: the network settled a payment we don't have as
-settled (the money moved but we think it didn't), the network rejected one
-we have as settled, a final payment the network has no record of, a payment
-the network processed that we have no record of, and amount or currency
-mismatches. It also compares settled counts and totals per currency, and
-counts the resends the network's dedupe absorbed.
-
-Run it from the dashboard ("Reconcile today"), with `GET /reconciliation`
-(`?day=YYYY-MM-DD`), or as a command:
-
-```bash
-python -m settlement.reconciliation --day 2026-10-22
-```
-
-Live, a payment whose answers were all lost ended up in the repair queue
-although the network had settled it. Reconciliation flagged it ("the
-network settled it, but our record says otherwise"; GBP totals £560.00
-apart). Resubmitting it with the same UETR made the network confirm instead
-of paying again, and the next run balanced.
-
-The simulator keeps its ledger in memory; set `RAIL_LEDGER_FILE` (e.g.
-`rail_ledger.jsonl`) so it survives restarts, like a real network's would.
-
-## Metrics (Prometheus + Grafana)
-
-The API serves Prometheus metrics at `/metrics`. Most come straight from
-the audit trail: it is append-only, so counting "entered settled", "entered
-retrying" and so on gives counters that only ever grow, which is what
-Prometheus needs, without adding anything to the workers.
-
-| Metric | What it is |
-|---|---|
-| `settlement_payments_entered_total{status, rail}` | Payments entering each status. `received` = submitted, `processing` = sent to the rail, `retrying` = failed send. |
-| `settlement_recoveries_total` | Times crash recovery acted on a payment |
-| `settlement_payments{status}` | Payments in each status right now |
-| `settlement_queue_payments{state}` | Redis queue right now: ready, in progress, waiting to retry |
-| `settlement_rate_limit_per_second{rail}` | Each rail's limit in force |
-
-Prometheus and Grafana run in Docker only when asked (about 75 MB of RAM
-together when idle), with a ready-made dashboard:
-
-```bash
-docker compose --profile metrics up -d   # then open http://127.0.0.1:3000
-```
-
-The dashboard shows settled, rejected, in-repair and queued totals, settled
-per second per rail against its rate limit, sends vs failed sends vs
-rejections vs payments giving up, the Redis queue, and payments in flight.
-An outage is visible at a glance: settled per second drops to zero, retries
-climb, and the in-repair tile turns purple.
+The payment networks are simulated; no real money moves.
