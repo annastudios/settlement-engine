@@ -130,3 +130,7 @@ Python 3.13 · FastAPI · PostgreSQL · SQLAlchemy · Redis (Lua scripts) ·
 Docker Compose · Prometheus · Grafana · pytest · GitHub Actions
 
 The payment networks are simulated; no real money moves.
+
+I built this with [Claude Code](https://claude.com/claude-code), an AI coding
+assistant, which helped write and debug the code. I reviewed each step before
+it was committed.
