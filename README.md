@@ -7,6 +7,12 @@ simulated payment networks (Faster Payments, SEPA), and keeps working when
 networks fail, workers crash or replies get lost, without ever **losing** a
 payment or **paying one twice**.
 
+![The one-click demo: a flaky network, a worker killed mid-payment and an outage, while the scoreboard stays at zero and reconciliation balances](docs/demo.gif)
+
+*The one-click demo on the live dashboard: the network gets flaky, a worker is
+killed mid-payment, the network goes down, ops resubmits, and the day ends
+balanced, while the scoreboard stays at* lost 0 · sent twice 0 · stuck 0.
+
 ## What it guarantees
 
 - **Never paid twice.** Every payment has a unique ID (UETR). Duplicates are
