@@ -47,7 +47,9 @@ def _schema():
 @pytest.fixture(autouse=True)
 def _empty_tables():
     with engine.begin() as conn:
-        conn.execute(text("TRUNCATE payments"))
+        # TRUNCATE is a table-level admin action, so the audit trail's
+        # append-only guard (which stops UPDATE and DELETE) doesn't block it.
+        conn.execute(text("TRUNCATE payment_events, payments"))
     # Only the test Redis DB (1), never the dev one.
     redis_client.flushdb()
 

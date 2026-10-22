@@ -14,10 +14,10 @@ import uuid
 from collections.abc import Callable
 
 import redis
-from sqlalchemy import select, update
+from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from settlement import config, connections, rate_limit, recovery, work_queue
+from settlement import audit, config, connections, rate_limit, recovery, work_queue
 from settlement.backoff import backoff_seconds
 from settlement.models import Payment
 from settlement.rail_client import RailRejected, RailUnavailable, send_to_rail
@@ -50,7 +50,7 @@ def process_one(
             # an attempt (nothing was sent) and its status doesn't change.
             work_queue.retry_later(r, uetr, worker_id, slot_in)
             return uetr
-        retry_in = _process(session, uuid.UUID(uetr), send)
+        retry_in = _process(session, uuid.UUID(uetr), send, actor=f"worker {worker_id}")
     if retry_in is None:
         work_queue.ack(r, uetr, worker_id)
     else:
@@ -72,16 +72,17 @@ def _rail_slot(r: redis.Redis, session: Session, uetr: str) -> float:
 
 
 def _process(
-    session: Session, uetr: uuid.UUID, send: Callable[[Payment], None]
+    session: Session, uetr: uuid.UUID, send: Callable[[Payment], None], *, actor: str
 ) -> float | None:
     """Send the payment to the rail and record the outcome. Returns how many
     seconds to wait before retrying, or None if there is nothing to retry."""
     # Postgres guard: only a payment waiting for an attempt may start.
     # Redis decides who works on a payment; this makes sure it happens once,
     # even if the same UETR was somehow queued or handed out twice.
-    started = _move(
+    started = audit.move(
         session, uetr, (PaymentStatus.RECEIVED, PaymentStatus.RETRYING),
-        PaymentStatus.PROCESSING, attempts=Payment.attempts + 1,
+        PaymentStatus.PROCESSING, actor=actor, reason="sending to the rail",
+        attempts=Payment.attempts + 1,
     )
     if not started:
         log.info("payment %s is not waiting to be processed; skipping", uetr)
@@ -91,8 +92,9 @@ def _process(
     try:
         send(payment)
     except RailRejected as exc:
-        _move(
+        audit.move(
             session, uetr, (PaymentStatus.PROCESSING,), PaymentStatus.REJECTED,
+            actor=actor, reason=f"rejected by the rail: {exc.reason}",
             rejection_reason=exc.reason,
         )
         log.info("payment %s rejected by the rail: %s", uetr, exc.reason)
@@ -100,18 +102,23 @@ def _process(
     except RailUnavailable as exc:
         # Outcome unknown: the next attempt resends the same UETR, which the
         # rail dedupes, so it can't move the money twice.
-        return _after_unavailable(session, payment, str(exc))
+        return _after_unavailable(session, payment, str(exc), actor=actor)
 
-    _move(session, uetr, (PaymentStatus.PROCESSING,), PaymentStatus.SETTLED, last_error=None)
+    audit.move(
+        session, uetr, (PaymentStatus.PROCESSING,), PaymentStatus.SETTLED,
+        actor=actor, reason="settled by the rail", last_error=None,
+    )
     log.info("payment %s settled (attempt %d)", uetr, payment.attempts)
     return None
 
 
-def _after_unavailable(session: Session, payment: Payment, error: str) -> float | None:
+def _after_unavailable(
+    session: Session, payment: Payment, error: str, *, actor: str
+) -> float | None:
     if payment.attempts >= config.MAX_ATTEMPTS:
-        _move(
+        audit.move(
             session, payment.uetr, (PaymentStatus.PROCESSING,), PaymentStatus.IN_REPAIR,
-            last_error=error,
+            actor=actor, reason=f"out of attempts: {error}", last_error=error,
         )
         log.warning(
             "payment %s moved to the repair queue after %d attempts: %s",
@@ -119,36 +126,18 @@ def _after_unavailable(session: Session, payment: Payment, error: str) -> float 
         )
         return None
 
-    _move(
-        session, payment.uetr, (PaymentStatus.PROCESSING,), PaymentStatus.RETRYING,
-        last_error=error,
-    )
     delay = backoff_seconds(
         payment.attempts, config.RETRY_BASE_SECONDS, config.RETRY_MAX_DELAY_SECONDS
+    )
+    audit.move(
+        session, payment.uetr, (PaymentStatus.PROCESSING,), PaymentStatus.RETRYING,
+        actor=actor, reason=f"{error}; retrying in {delay:.1f}s", last_error=error,
     )
     log.warning(
         "rail unavailable for payment %s (attempt %d of %d), retrying in %.1fs: %s",
         payment.uetr, payment.attempts, config.MAX_ATTEMPTS, delay, error,
     )
     return delay
-
-
-def _move(
-    session: Session,
-    uetr: uuid.UUID,
-    from_statuses: tuple[str, ...],
-    to_status: str,
-    **changes,
-) -> bool:
-    """Change the status (and any other columns in changes) only if it is
-    currently one of from_statuses. True if it changed."""
-    result = session.execute(
-        update(Payment)
-        .where(Payment.uetr == uetr, Payment.status.in_(from_statuses))
-        .values(status=to_status, **changes)
-    )
-    session.commit()
-    return result.rowcount == 1
 
 
 def run(
@@ -166,7 +155,7 @@ def run(
         if time.monotonic() >= next_recovery:
             next_recovery = time.monotonic() + config.RECOVERY_INTERVAL_SECONDS
             try:
-                recovery.recover(connections.redis_client)
+                recovery.recover(connections.redis_client, actor=f"recovery by worker {worker_id}")
             except Exception:
                 log.exception("crash recovery failed; will try again")
         try:

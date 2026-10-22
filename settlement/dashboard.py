@@ -41,7 +41,9 @@ _SPEED_WINDOW_SECONDS = 5
 
 @router.get("/dashboard", include_in_schema=False)
 def dashboard_page():
-    return FileResponse(_PAGE)
+    # no-cache: browsers must check for a newer page each time, so an
+    # updated dashboard shows up on reload instead of a stale cached copy.
+    return FileResponse(_PAGE, headers={"Cache-Control": "no-cache"})
 
 
 @router.get("/stats")
@@ -135,7 +137,7 @@ def send_demo_payments(
 ):
     """Submit `count` random test payments (about 1 in 10 to a closed account)."""
     for _ in range(count):
-        payment, _created = submit_payment(session, _random_payment())
+        payment, _created = submit_payment(session, _random_payment(), actor="dashboard demo")
         work_queue.enqueue(connections.redis_client, str(payment.uetr))
     return {"submitted": count}
 

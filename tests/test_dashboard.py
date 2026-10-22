@@ -11,6 +11,7 @@ def test_dashboard_page_is_served(client):
 
     assert response.status_code == 200
     assert "Settlement Engine" in response.text
+    assert response.headers["cache-control"] == "no-cache"  # updates show on reload
 
 
 def test_stats_on_an_empty_system(client):

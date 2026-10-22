@@ -4,14 +4,19 @@ from contextlib import asynccontextmanager
 
 import redis
 from fastapi import Depends, FastAPI, HTTPException, Response
-from sqlalchemy import select, text, update
+from sqlalchemy import select, text
 from sqlalchemy.orm import Session
 
-from settlement import connections, dashboard, work_queue
+from settlement import audit, connections, dashboard, work_queue
 from settlement.connections import get_session
 from settlement.models import Base, Payment
 from settlement.payments import UetrConflict, submit_payment
-from settlement.schemas import PaymentRequest, PaymentResponse, PaymentStatus
+from settlement.schemas import (
+    PaymentEventResponse,
+    PaymentRequest,
+    PaymentResponse,
+    PaymentStatus,
+)
 
 
 @asynccontextmanager
@@ -114,12 +119,10 @@ def resubmit_payment(uetr: uuid.UUID, session: Session = Depends(get_session)):
     """Give a payment from the repair queue a fresh set of attempts, e.g. once
     the rail is healthy again. Safe even if an earlier attempt did go through:
     it is resent with the same UETR, which the rail dedupes."""
-    moved = session.execute(
-        update(Payment)
-        .where(Payment.uetr == uetr, Payment.status == PaymentStatus.IN_REPAIR)
-        .values(status=PaymentStatus.RETRYING, attempts=0)
-    ).rowcount
-    session.commit()
+    moved = audit.move(
+        session, uetr, (PaymentStatus.IN_REPAIR,), PaymentStatus.RETRYING,
+        actor="ops", reason="resubmitted from the repair queue", attempts=0,
+    )
     payment = session.get(Payment, uetr, populate_existing=True)
     if payment is None:
         raise HTTPException(status_code=404, detail="payment not found")
@@ -129,3 +132,11 @@ def resubmit_payment(uetr: uuid.UUID, session: Session = Depends(get_session)):
         )
     work_queue.enqueue(connections.redis_client, str(uetr))
     return payment
+
+
+@app.get("/payments/{uetr}/history", response_model=list[PaymentEventResponse])
+def payment_history(uetr: uuid.UUID, session: Session = Depends(get_session)):
+    """Everything that ever happened to a payment, oldest first: the audit trail."""
+    if session.get(Payment, uetr) is None:
+        raise HTTPException(status_code=404, detail="payment not found")
+    return audit.history(session, uetr)

@@ -24,9 +24,9 @@ import uuid
 from datetime import timedelta
 
 import redis
-from sqlalchemy import func, select, update
+from sqlalchemy import func, select
 
-from settlement import config, connections, work_queue
+from settlement import audit, config, connections, work_queue
 from settlement.models import Payment
 from settlement.schemas import PaymentStatus
 
@@ -36,21 +36,32 @@ _WAITING = (PaymentStatus.RECEIVED, PaymentStatus.RETRYING)
 _STOPPED_ERROR = "worker stopped while processing (lease expired)"
 
 
-def recover(r: redis.Redis) -> int:
-    """Run one recovery pass. Returns how many payments were re-queued."""
+def recover(r: redis.Redis, actor: str = "recovery") -> int:
+    """Run one recovery pass. Returns how many payments were re-queued.
+    actor names who ran it in the audit trail."""
     requeued = 0
     for uetr in work_queue.reclaim_expired(r):
-        if _requeue(r, uuid.UUID(uetr)):
+        if _requeue(r, uuid.UUID(uetr), actor=actor, why="its worker stopped while holding it"):
             log.warning("payment %s recovered: its worker stopped holding it", uetr)
             requeued += 1
     for uetr in _orphans(r):
-        if _requeue(r, uetr, unchanged_for=timedelta(seconds=config.ORPHAN_AFTER_SECONDS)):
+        if _requeue(
+            r, uetr, actor=actor, why="it was missing from the queue",
+            unchanged_for=timedelta(seconds=config.ORPHAN_AFTER_SECONDS),
+        ):
             log.warning("payment %s recovered: it was missing from the queue", uetr)
             requeued += 1
     return requeued
 
 
-def _requeue(r: redis.Redis, uetr: uuid.UUID, unchanged_for: timedelta | None = None) -> bool:
+def _requeue(
+    r: redis.Redis,
+    uetr: uuid.UUID,
+    *,
+    actor: str,
+    why: str,
+    unchanged_for: timedelta | None = None,
+) -> bool:
     """Put the payment back in the queue if it is still waiting for an attempt.
 
     A payment left in 'processing' counts that attempt as used: it goes back
@@ -59,26 +70,27 @@ def _requeue(r: redis.Redis, uetr: uuid.UUID, unchanged_for: timedelta | None = 
     With unchanged_for, only a payment unchanged for at least that long is
     touched, so one a worker is handling right now is left alone.
     """
-    abandoned = [Payment.uetr == uetr, Payment.status == PaymentStatus.PROCESSING]
-    if unchanged_for is not None:
-        abandoned.append(Payment.updated_at < func.now() - unchanged_for)
+    quiet = () if unchanged_for is None else (Payment.updated_at < func.now() - unchanged_for,)
+    abandoned = (PaymentStatus.PROCESSING,)
 
     with connections.SessionLocal() as session:
-        session.execute(
-            update(Payment)
-            .where(*abandoned, Payment.attempts < config.MAX_ATTEMPTS)
-            .values(status=PaymentStatus.RETRYING, last_error=_STOPPED_ERROR)
+        moved = audit.move(
+            session, uetr, abandoned, PaymentStatus.RETRYING,
+            actor=actor, reason=f"recovered: {why}",
+            only_if=(*quiet, Payment.attempts < config.MAX_ATTEMPTS),
+            last_error=_STOPPED_ERROR,
+        ) or audit.move(
+            session, uetr, abandoned, PaymentStatus.IN_REPAIR,
+            actor=actor, reason=f"recovered, out of attempts: {why}",
+            only_if=(*quiet, Payment.attempts >= config.MAX_ATTEMPTS),
+            last_error=_STOPPED_ERROR,
         )
-        session.execute(
-            update(Payment)
-            .where(*abandoned, Payment.attempts >= config.MAX_ATTEMPTS)
-            .values(status=PaymentStatus.IN_REPAIR, last_error=_STOPPED_ERROR)
-        )
-        session.commit()
         status = session.scalar(select(Payment.status).where(Payment.uetr == uetr))
+        if status not in _WAITING:
+            return False  # final, in repair, or being processed right now
+        if not moved:
+            audit.note(session, uetr, actor=actor, reason=f"put back in the queue: {why}")
 
-    if status not in _WAITING:
-        return False  # final, in repair, or being processed right now
     work_queue.enqueue(r, str(uetr))
     return True
 

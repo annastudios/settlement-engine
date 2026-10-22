@@ -10,7 +10,8 @@ no payment was lost or processed twice.
 > a simulated rail that settles, rejects, fails and loses answers. Failed
 > sends are retried with backoff, payments that keep failing land in a
 > repair queue, payments left behind by crashed workers (or lost by Redis)
-> are recovered, and each rail has a rate limit shared by all workers.
+> are recovered, each rail has a rate limit shared by all workers, and
+> every change is recorded in an append-only audit trail.
 
 ## Design in one line
 
@@ -51,7 +52,8 @@ Then open the **live dashboard** at http://localhost:8000/dashboard.
   worker holds which payment, and how long its lease has left), waiting to
   retry
 - The repair queue, with a **Resubmit** button per payment
-- Recent payments, each row flashing when its status changes
+- Recent payments, each row flashing when its status changes; click one to
+  see its full history
 
 Buttons send batches of random FPS/SEPA payments (about 1 in 10 FPS ones to
 a closed account) and switch the rail simulator between **Healthy**,
@@ -73,6 +75,7 @@ change, reset the dev database with `docker compose down -v`.
 |---|---|
 | `POST /payments` | Submit a payment. **201** new, **200** if this exact payment was already submitted, **409** if its UETR belongs to a different payment, **422** if invalid. |
 | `GET /payments/{uetr}` | Look up a payment, including `attempts` and `last_error`. |
+| `GET /payments/{uetr}/history` | The payment's audit trail: every change, who made it and why. |
 | `GET /repair-queue` | Payments that ran out of attempts, oldest first. |
 | `POST /payments/{uetr}/resubmit` | Give a payment in the repair queue a fresh set of attempts. **409** if it isn't in the repair queue. |
 | `GET /health` | Postgres and Redis status; **503** if either is down. |
@@ -237,3 +240,26 @@ at 5 FPS payments per second after a one-second burst.
 
 Changing a limit applies to new bookings; slots already booked keep their
 times.
+
+## Audit trail
+
+Every change to a payment is recorded in `payment_events`: when, from which
+status to which, the attempt number, **who** made it (`api`, `worker <id>`,
+`recovery by worker <id>`, `ops`) and **why** (`rail answered 503; retrying
+in 1.3s`, `rejected by the rail: AC04`, `recovered: its worker stopped while
+holding it`, ...). See it with `GET /payments/{uetr}/history`, or click a
+payment on the dashboard.
+
+- **Written with the change, in the same transaction.** All status changes
+  go through `audit.move()`, which locks the payment row, checks its current
+  status, updates it and inserts the audit row, then commits. The change and
+  its history entry are saved together or not at all, so the trail can never
+  miss a change or describe one that didn't happen
+  (`test_after_a_messy_run_every_payment_matches_its_trail`).
+- **Append-only, enforced by Postgres.** A trigger rejects every `UPDATE` and
+  `DELETE` on `payment_events`, so history can't be rewritten even by code
+  or a person that bypasses this application.
+- Timestamps use `clock_timestamp()`, so entries written in one transaction
+  still get distinct, ordered times.
+
+Payments created before the audit trail existed have no history.

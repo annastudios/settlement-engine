@@ -72,16 +72,27 @@ def test_concurrent_workers_never_book_the_same_slot(limits):
 
     def book(_):
         start_together.wait()
-        return [rate_limit.book_slot(r, "FPS") for _ in range(10)]
+        # When each slot starts = when it was booked + how long until it.
+        # perf_counter: time.monotonic() ticks only every ~16ms on Windows.
+        return [time.perf_counter() + rate_limit.book_slot(r, "FPS") for _ in range(10)]
 
+    before = time.perf_counter()
     with ThreadPoolExecutor(max_workers=8) as pool:
-        waits = [w for batch in pool.map(book, range(8)) for w in batch]
+        slots = sorted(s for batch in pool.map(book, range(8)) for s in batch)
 
-    # 80 bookings at 10/s: exactly 10 go now, and the other 70 each get
-    # their own slot 100ms apart, so no two share one.
-    assert waits.count(0) == 10
-    slots = sorted(round(w, 1) for w in waits if w > 0)
-    assert slots == [round(0.1 * n, 1) for n in range(1, 71)]
+    # 80 bookings at 10/s: exactly 10 go now (a one-second burst), and the
+    # other 70 each get their own slot, 100ms after the one before, so no
+    # two share one. Compared as times, not rounded waits: the bookings are
+    # spread over a few ms, so rounding each wait would be fragile.
+    booked_now = [s for s in slots if s - before < 0.05]
+    later = slots[len(booked_now):]
+    assert len(booked_now) == 10
+    gaps = [b - a for a, b in zip(later, later[1:])]
+    assert len(later) == 70
+    # Two bookings sharing a slot would show up as a gap near 0.
+    assert min(gaps) > 0.05, min(gaps)
+    # 70 slots, 100ms apart: the last starts about 6.9s after the first.
+    assert 6.7 < later[-1] - later[0] < 7.1
 
 
 # --- changing the limit while running ----------------------------------------

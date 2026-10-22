@@ -1,7 +1,7 @@
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.orm import Session
 
-from settlement.models import Payment
+from settlement.models import Payment, PaymentEvent
 from settlement.schemas import PaymentRequest, PaymentStatus
 
 # The fields that make up the instruction itself (everything the client sent
@@ -22,8 +22,11 @@ class UetrConflict(Exception):
     """The UETR already belongs to a payment with different details."""
 
 
-def submit_payment(session: Session, request: PaymentRequest) -> tuple[Payment, bool]:
-    """Store a new payment. Returns (payment, created).
+def submit_payment(
+    session: Session, request: PaymentRequest, actor: str = "api"
+) -> tuple[Payment, bool]:
+    """Store a new payment and the first entry of its audit trail, in one
+    transaction. Returns (payment, created).
 
     Submitting the same payment twice is safe: the second call returns the
     stored payment with created=False. Reusing a UETR for a different payment
@@ -44,6 +47,13 @@ def submit_payment(session: Session, request: PaymentRequest) -> tuple[Payment, 
         .on_conflict_do_nothing(index_elements=[Payment.uetr])
         .returning(Payment.uetr)
     ).scalar_one_or_none()
+    if inserted_uetr is not None:
+        session.add(
+            PaymentEvent(
+                uetr=inserted_uetr, from_status=None, to_status=PaymentStatus.RECEIVED,
+                attempt=0, actor=actor, reason="submitted",
+            )
+        )
     session.commit()
 
     payment = session.get(Payment, request.uetr)

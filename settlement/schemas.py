@@ -64,6 +64,19 @@ class PaymentRequest(BaseModel):
         return self
 
 
+class PaymentEventResponse(BaseModel):
+    """One entry in a payment's audit trail."""
+
+    model_config = ConfigDict(from_attributes=True)
+
+    at: datetime
+    from_status: PaymentStatus | None
+    to_status: PaymentStatus
+    attempt: int
+    actor: str
+    reason: str | None
+
+
 class PaymentResponse(PaymentRequest):
     model_config = ConfigDict(from_attributes=True)
 

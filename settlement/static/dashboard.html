@@ -73,6 +73,22 @@
   .bar > span { display: block; height: 100%; background: var(--processing); transition: width .6s; }
   .bar.at-limit > span { background: var(--retrying); }
   .speed { font-variant-numeric: tabular-nums; }
+  #recent tr { cursor: pointer; }
+  #recent tr:hover td { background: var(--bg); }
+  #recent tr.selected td { background: var(--flash); }
+  .history-panel { margin-bottom: 12px; }
+  .history-head { display: flex; justify-content: space-between; align-items: baseline; gap: 12px; flex-wrap: wrap; }
+  ol.trail { list-style: none; margin: 0; padding: 0; }
+  ol.trail li {
+    display: grid; grid-template-columns: 110px auto 1fr; gap: 4px 12px; align-items: baseline;
+    padding: 8px 0; border-bottom: 1px solid var(--line);
+  }
+  ol.trail li:last-child { border-bottom: 0; }
+  ol.trail .when { font-variant-numeric: tabular-nums; color: var(--muted); font-size: 12px; }
+  ol.trail .change { display: flex; gap: 6px; align-items: center; white-space: nowrap; }
+  ol.trail .who { font-size: 12px; }
+  ol.trail .why { grid-column: 3; color: var(--muted); font-size: 12px; }
+  @media (max-width: 600px) { ol.trail li { grid-template-columns: 1fr; } ol.trail .why { grid-column: 1; } }
   .empty { color: var(--muted); padding: 8px 0; }
   .error { color: var(--rejected); }
 </style>
@@ -121,8 +137,17 @@
     </div>
   </section>
 
+  <section class="panel history-panel" id="history-panel" hidden>
+    <div class="history-head">
+      <h2>History of <span class="mono" id="history-title"></span></h2>
+      <button class="small" id="history-close">Close</button>
+    </div>
+    <ol class="trail" id="history"></ol>
+    <div class="hint">The audit trail: every change, who made it and why. Recorded with the change itself, and the database refuses to edit or delete it.</div>
+  </section>
+
   <section class="panel">
-    <h2>Recent payments</h2>
+    <h2>Recent payments <span class="hint">(click one to see its history)</span></h2>
     <div class="table-wrap">
       <table>
         <thead><tr><th>UETR</th><th>Rail</th><th>Amount</th><th>Status</th><th>Attempts</th><th>Updated</th><th>Detail</th></tr></thead>
@@ -212,6 +237,38 @@ function renderQueue(queue) {
     : el("div", { class: "empty" }, "No worker is holding a payment right now."));
 }
 
+let selected = null;
+
+function showHistory(uetr) {
+  selected = uetr;
+  document.getElementById("history-panel").hidden = false;
+  document.getElementById("history-title").textContent = uetr;
+  refresh();
+}
+
+document.getElementById("history-close").addEventListener("click", () => {
+  selected = null;
+  document.getElementById("history-panel").hidden = true;
+  refresh();
+});
+
+async function renderHistory() {
+  if (!selected) return;
+  const response = await fetch(`/payments/${selected}/history`);
+  if (!response.ok) return;
+  const events = await response.json();
+  document.getElementById("history").replaceChildren(...events.map(e => el("li", {},
+    el("span", { class: "when" }, new Date(e.at).toLocaleTimeString(undefined, { hour12: false }) +
+      "." + String(new Date(e.at).getMilliseconds()).padStart(3, "0")),
+    el("span", { class: "change" },
+      e.from_status && e.from_status !== e.to_status ? pill(e.from_status) : "",
+      e.from_status && e.from_status !== e.to_status ? "→" : "",
+      pill(e.to_status),
+      el("span", { class: "hint" }, `attempt ${e.attempt}`)),
+    el("span", { class: "who mono" }, e.actor),
+    el("span", { class: "why" }, e.reason || ""))));
+}
+
 const LIMIT_CHOICES = [2, 5, 10, 50];
 
 function renderLimits(limits) {
@@ -262,7 +319,8 @@ function renderRecent(payments) {
     const changed = lastStatus.has(p.uetr) && lastStatus.get(p.uetr) !== p.status;
     lastStatus.set(p.uetr, p.status);
     const detail = p.rejection_reason ? `rejected: ${p.rejection_reason}` : (p.last_error || "");
-    return el("tr", { class: changed ? "flash" : "" },
+    const classes = [changed ? "flash" : "", p.uetr === selected ? "selected" : ""].join(" ").trim();
+    return el("tr", { class: classes, onclick: () => showHistory(p.uetr) },
       el("td", { class: "mono" }, p.uetr.slice(0, 8)),
       el("td", {}, p.rail),
       el("td", {}, money(p)),
@@ -311,6 +369,7 @@ async function refresh() {
     renderLimits(data.rate_limits);
     renderRepair(data.repair_queue);
     renderRecent(data.recent);
+    await renderHistory();
     renderChaos(data.rail);
     document.getElementById("dot").classList.remove("down");
     document.getElementById("live-text").textContent = "live";
