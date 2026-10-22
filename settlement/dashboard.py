@@ -8,7 +8,7 @@ behaviour. They are for local development and demos only.
 
 import random
 import uuid
-from datetime import timedelta
+from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from pathlib import Path
 
@@ -20,7 +20,7 @@ from pydantic import BaseModel, Field
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
-from settlement import connections, rail_client, rate_limit, work_queue
+from settlement import connections, rail_client, rate_limit, reconciliation, work_queue
 from settlement.connections import get_session
 from settlement.models import Payment
 from settlement.payments import submit_payment
@@ -37,6 +37,10 @@ _CREDITOR_IBAN = {"FPS": "GB82WEST12345698765432", "SEPA": "DE893704004405320130
 _CLOSED_ACCOUNT = "GB56CLOS00000000000001"  # the rail rejects it with AC04
 # Window for measuring each rail's actual speed.
 _SPEED_WINDOW_SECONDS = 5
+# An in-flight payment unchanged this long, that nothing will pick up, is stuck.
+# (Crash recovery normally acts within about 40 seconds.)
+STUCK_AFTER_SECONDS = 120
+_IN_FLIGHT = (PaymentStatus.RECEIVED, PaymentStatus.PROCESSING, PaymentStatus.RETRYING)
 
 
 @router.get("/dashboard", include_in_schema=False)
@@ -67,6 +71,69 @@ def stats(session: Session = Depends(get_session)):
         "recent": [_as_json(p) for p in recent],
         "repair_queue": [_as_json(p) for p in repair],
     }
+
+
+@router.get("/scoreboard")
+def scoreboard(session: Session = Depends(get_session)):
+    """The system's promises, checked live.
+
+    lost:       payments where we and the network disagree (a live
+                reconciliation of today), leaving out payments still in
+                flight here: a worker may be about to record the answer,
+                or a retry will ask the network again
+    sent_twice: payments the network settled more than once, from the
+                network's own records
+    stuck:      in-flight payments unchanged for STUCK_AFTER_SECONDS that
+                nothing will pick up (no live claim, not waiting in Redis)
+    None means it can't be checked right now (network or Redis unreachable).
+    """
+    needs_person = session.scalar(
+        select(func.count()).where(Payment.status == PaymentStatus.IN_REPAIR)
+    )
+    result = {
+        "lost": None, "sent_twice": None, "resends_absorbed": None,
+        "stuck": _stuck(session, connections.redis_client),
+        "needs_person": needs_person,
+        "stuck_after_seconds": STUCK_AFTER_SECONDS,
+    }
+    try:
+        ledger = rail_client.fetch_ledger()
+    except httpx.HTTPError:
+        return result
+    settled = [e["uetr"] for e in ledger if e["status"] == PaymentStatus.SETTLED]
+    report = reconciliation.run_for_day(session, datetime.now(UTC).date(), network_ledger=ledger)
+    lost = [b for b in report["breaks"] if b["our_status"] not in _IN_FLIGHT]
+    return result | {
+        "lost": len(lost),
+        "sent_twice": len(settled) - len(set(settled)),
+        "resends_absorbed": sum(max(0, e.get("received_count", 1) - 1) for e in ledger),
+    }
+
+
+def _stuck(session: Session, r: redis.Redis) -> int | None:
+    candidates = session.scalars(
+        select(Payment.uetr)
+        .where(
+            Payment.status.in_(_IN_FLIGHT),
+            Payment.updated_at < func.now() - timedelta(seconds=STUCK_AFTER_SECONDS),
+        )
+        .limit(500)
+    ).all()
+    if not candidates:
+        return 0
+    try:
+        seconds, micros = r.time()
+        now_ms = seconds * 1000 + micros // 1000
+        stuck = 0
+        for uetr in map(str, candidates):
+            lease_deadline = r.zscore(work_queue.LEASES, uetr)
+            if lease_deadline is not None:
+                stuck += lease_deadline < now_ms  # its worker is gone
+            elif not work_queue.is_queued(r, uetr):
+                stuck += 1  # nothing knows about it
+        return stuck
+    except redis.RedisError:
+        return None
 
 
 def _as_json(payment: Payment) -> dict:
@@ -112,12 +179,22 @@ def _rate_limits(session: Session, r: redis.Redis) -> dict:
     )
     try:
         in_force = rate_limit.limits(r)
+        booked = list(r.smembers(rate_limit.BOOKED))
     except redis.RedisError:
         return {}
+    # Payments parked until their booked rate-limit slot, per rail.
+    waiting = dict(
+        session.execute(
+            select(Payment.rail, func.count())
+            .where(Payment.uetr.in_([uuid.UUID(u) for u in booked]))
+            .group_by(Payment.rail)
+        ).all()
+    ) if booked else {}
     return {
         rail: {
             "limit_per_second": limit,
             "actual_per_second": round(finished.get(rail, 0) / _SPEED_WINDOW_SECONDS, 1),
+            "waiting_for_slot": waiting.get(rail, 0),
         }
         for rail, limit in in_force.items()
     }

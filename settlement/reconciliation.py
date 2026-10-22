@@ -107,9 +107,12 @@ def _settled_totals(records: list[dict]) -> dict:
     return {code: {"count": t["count"], "amount": str(t["amount"])} for code, t in sorted(totals.items())}
 
 
-def run_for_day(session: Session, day: date) -> dict:
+def run_for_day(
+    session: Session, day: date, network_ledger: list[dict] | None = None
+) -> dict:
     """Reconcile one business day (UTC): our payments created that day, plus
-    anything the network processed that day."""
+    anything the network processed that day. Pass network_ledger if it was
+    already fetched, to avoid asking the network twice."""
     start = datetime.combine(day, time.min, UTC)
     end = start + timedelta(days=1)
 
@@ -120,7 +123,7 @@ def run_for_day(session: Session, day: date) -> dict:
         )
     }
     network = [
-        n for n in rail_client.fetch_ledger()
+        n for n in (rail_client.fetch_ledger() if network_ledger is None else network_ledger)
         if n["uetr"] in ours or start <= datetime.fromisoformat(n["processed_at"]) < end
     ]
     # Something the network processed today may have been submitted on an

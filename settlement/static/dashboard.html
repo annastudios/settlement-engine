@@ -4,173 +4,499 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Settlement Engine</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500&display=swap">
 <style>
+  /* Layout: a fixed sidebar (Catalog-style) beside a scrolling page; a soft
+     blue glowing hero for the scoreboard (FundFlow-style); clean frosted
+     cards below. Collapses to one column with a top bar on narrow screens. */
   :root {
-    --bg: #f6f7f9; --panel: #ffffff; --text: #1c2330; --muted: #6b7380; --line: #e3e6eb;
-    --received: #6b7380; --processing: #2f6fde; --retrying: #c98a06;
-    --settled: #1f9d55; --rejected: #d64545; --in_repair: #8a4fd8;
-    --flash: #fff4c2;
+    --bg: #e8edf7;
+    --bg-glow-1: #c9d4ff;
+    --bg-glow-2: #d9e6ff;
+    --surface: rgba(255, 255, 255, 0.78);
+    --surface-strong: #ffffff;
+    --surface-sunk: #f2f5fb;
+    --ink: #151b2c;
+    --muted: #697389;
+    --line: rgba(21, 27, 44, 0.08);
+    --accent: #5b63f0;
+    --accent-soft: #e6e8ff;
+    --pill-dark: #141a2b;
+    --pill-dark-ink: #ffffff;
+    --hero-1: #b9c4ff;
+    --hero-2: #8f9cff;
+    --hero-3: #dfe6ff;
+    --received: #8a93a8;
+    --processing: #4f7cf7;
+    --retrying: #d9941a;
+    --settled: #1d9f6a;
+    --rejected: #e04848;
+    --in_repair: #9758ec;
+    --ok-soft: #e1f5ec;
+    --bad-soft: #fde7e7;
+    --shadow: 0 1px 2px rgba(21, 27, 44, 0.04), 0 8px 24px rgba(40, 56, 120, 0.06);
+    --font-body: "Plus Jakarta Sans", "Segoe UI", system-ui, sans-serif;
+    --font-mono: "JetBrains Mono", ui-monospace, Consolas, monospace;
   }
   @media (prefers-color-scheme: dark) {
-    :root {
-      --bg: #12151b; --panel: #1b2029; --text: #e6e9ef; --muted: #8d95a3; --line: #2b313c;
-      --received: #8d95a3; --processing: #5b8ff0; --retrying: #e0a92a;
-      --settled: #3cc47a; --rejected: #ee6b6b; --in_repair: #a77ff0;
-      --flash: #3d3720;
+    :root:not([data-theme="light"]) {
+      --bg: #0e1220; --bg-glow-1: #1c2350; --bg-glow-2: #15203f;
+      --surface: rgba(26, 32, 52, 0.78); --surface-strong: #1c2238; --surface-sunk: #151a2c;
+      --ink: #e7eaf4; --muted: #98a1b8; --line: rgba(231, 234, 244, 0.09);
+      --accent: #8b92ff; --accent-soft: #262b55;
+      --pill-dark: #e7eaf4; --pill-dark-ink: #10131f;
+      --hero-1: #2b3577; --hero-2: #4651b8; --hero-3: #1b2147;
+      --received: #9aa3b8; --processing: #6f97ff; --retrying: #f0b03d;
+      --settled: #3cc58d; --rejected: #f56c6c; --in_repair: #b384ff;
+      --ok-soft: #173528; --bad-soft: #3d1c22;
+      --shadow: 0 1px 2px rgba(0, 0, 0, 0.3), 0 8px 24px rgba(0, 0, 0, 0.25);
+      color-scheme: dark;
     }
   }
+  :root[data-theme="dark"] {
+    --bg: #0e1220; --bg-glow-1: #1c2350; --bg-glow-2: #15203f;
+    --surface: rgba(26, 32, 52, 0.78); --surface-strong: #1c2238; --surface-sunk: #151a2c;
+    --ink: #e7eaf4; --muted: #98a1b8; --line: rgba(231, 234, 244, 0.09);
+    --accent: #8b92ff; --accent-soft: #262b55;
+    --pill-dark: #e7eaf4; --pill-dark-ink: #10131f;
+    --hero-1: #2b3577; --hero-2: #4651b8; --hero-3: #1b2147;
+    --received: #9aa3b8; --processing: #6f97ff; --retrying: #f0b03d;
+    --settled: #3cc58d; --rejected: #f56c6c; --in_repair: #b384ff;
+    --ok-soft: #173528; --bad-soft: #3d1c22;
+    --shadow: 0 1px 2px rgba(0, 0, 0, 0.3), 0 8px 24px rgba(0, 0, 0, 0.25);
+    color-scheme: dark;
+  }
+
   * { box-sizing: border-box; }
+  html, body { margin: 0; }
   body {
-    margin: 0; background: var(--bg); color: var(--text);
-    font: 14px/1.45 system-ui, -apple-system, "Segoe UI", sans-serif;
+    font: 14px/1.5 var(--font-body);
+    color: var(--ink);
+    background:
+      radial-gradient(1100px 600px at 85% -10%, var(--bg-glow-1), transparent 60%),
+      radial-gradient(900px 500px at -10% 110%, var(--bg-glow-2), transparent 60%),
+      var(--bg);
+    background-attachment: fixed;
+    min-height: 100vh;
   }
-  main { max-width: 1200px; margin: 0 auto; padding: 20px 16px 40px; }
-  header { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; margin-bottom: 16px; }
-  h1 { font-size: 20px; margin: 0; }
-  h2 { font-size: 13px; text-transform: uppercase; letter-spacing: .06em; color: var(--muted); margin: 0 0 10px; }
-  .live { display: inline-flex; align-items: center; gap: 6px; color: var(--muted); font-size: 13px; }
-  .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--settled); animation: pulse 1.5s infinite; }
-  .dot.down { background: var(--rejected); animation: none; }
-  @keyframes pulse { 50% { opacity: .3; } }
-  .panel { background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 14px; }
-  .grid { display: grid; gap: 12px; }
-  .tiles { grid-template-columns: repeat(auto-fit, minmax(120px, 1fr)); margin-bottom: 12px; }
-  .tile { border-left: 4px solid var(--c); }
-  .tile .n { font-size: 26px; font-weight: 650; font-variant-numeric: tabular-nums; }
-  .tile .label { color: var(--muted); font-size: 12px; }
-  .row2 { grid-template-columns: 1fr 1fr; margin-bottom: 12px; }
-  @media (max-width: 800px) { .row2 { grid-template-columns: 1fr; } }
-  .buttons { display: flex; gap: 8px; flex-wrap: wrap; }
-  button {
-    font: inherit; padding: 7px 12px; border-radius: 7px; cursor: pointer;
-    border: 1px solid var(--line); background: var(--bg); color: var(--text);
+  button { font: inherit; color: inherit; }
+  :focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+  .mono { font-family: var(--font-mono); font-size: 12px; }
+  .muted { color: var(--muted); }
+  .num { font-variant-numeric: tabular-nums; }
+
+  .app { display: grid; grid-template-columns: 232px minmax(0, 1fr); min-height: 100vh; }
+
+  /* Sidebar */
+  .sidebar {
+    position: sticky; top: 0; height: 100vh; padding: 22px 16px;
+    display: flex; flex-direction: column; gap: 26px;
+    background: var(--surface); border-right: 1px solid var(--line);
+    backdrop-filter: blur(14px);
   }
-  button:hover { border-color: var(--muted); }
-  button.active { background: var(--text); color: var(--panel); border-color: var(--text); }
-  button.small { padding: 3px 8px; font-size: 12px; }
-  .hint { color: var(--muted); font-size: 12px; margin-top: 8px; }
-  .queue { display: flex; gap: 18px; flex-wrap: wrap; margin-bottom: 10px; }
-  .queue b { font-size: 20px; font-variant-numeric: tabular-nums; }
-  table { width: 100%; border-collapse: collapse; font-variant-numeric: tabular-nums; }
-  th { text-align: left; color: var(--muted); font-weight: 500; font-size: 12px; padding: 4px 8px; border-bottom: 1px solid var(--line); }
-  td { padding: 6px 8px; border-bottom: 1px solid var(--line); white-space: nowrap; }
-  td.wrap { white-space: normal; color: var(--muted); font-size: 12px; }
-  .table-wrap { overflow-x: auto; }
-  tr.flash td { animation: flash 1.2s ease-out; }
-  @keyframes flash { from { background: var(--flash); } to { background: transparent; } }
+  .brand { display: flex; align-items: center; gap: 10px; font-weight: 800; font-size: 15px; }
+  .brand-mark {
+    width: 32px; height: 32px; border-radius: 10px; display: grid; place-items: center;
+    background: linear-gradient(135deg, var(--accent), var(--hero-2)); color: #fff; font-size: 15px;
+  }
+  .nav-label { font-size: 11px; font-weight: 700; letter-spacing: .08em; text-transform: uppercase; color: var(--muted); margin: 0 10px 6px; }
+  .nav { display: grid; gap: 2px; }
+  .nav a {
+    display: flex; align-items: center; gap: 10px; padding: 8px 10px; border-radius: 10px;
+    color: var(--ink); text-decoration: none; font-weight: 500;
+  }
+  .nav a:hover { background: var(--accent-soft); }
+  .nav a .dot { width: 6px; height: 6px; border-radius: 50%; background: var(--muted); opacity: .5; }
+  .system { margin-top: auto; padding: 14px; border-radius: 14px; background: var(--surface-sunk); display: grid; gap: 8px; }
+  .system-row { display: flex; align-items: center; justify-content: space-between; font-size: 13px; }
+  .light { width: 8px; height: 8px; border-radius: 50%; background: var(--received); display: inline-block; margin-right: 6px; }
+  .light.up { background: var(--settled); box-shadow: 0 0 0 3px var(--ok-soft); }
+  .light.down { background: var(--rejected); box-shadow: 0 0 0 3px var(--bad-soft); }
+  .footnote { font-size: 11px; color: var(--muted); }
+
+  /* Main column */
+  main { padding: 22px 28px 48px; display: grid; gap: 18px; align-content: start; min-width: 0; }
+  .topbar { display: flex; align-items: center; justify-content: space-between; gap: 12px; flex-wrap: wrap; }
+  .topbar h1 { margin: 0; font-size: 24px; font-weight: 800; letter-spacing: -0.01em; }
+  .live { display: inline-flex; align-items: center; gap: 8px; color: var(--muted); font-size: 13px; }
+  .live .pulse { width: 8px; height: 8px; border-radius: 50%; background: var(--settled); animation: pulse 1.6s infinite; }
+  .live.offline .pulse { background: var(--rejected); animation: none; }
+  @keyframes pulse { 50% { opacity: .35; } }
+  @media (prefers-reduced-motion: reduce) { .live .pulse { animation: none; } }
+
+  .card {
+    background: var(--surface); border: 1px solid var(--line); border-radius: 20px;
+    padding: 18px 20px; box-shadow: var(--shadow); backdrop-filter: blur(14px); min-width: 0;
+  }
+  .card-head { display: flex; align-items: center; justify-content: space-between; gap: 10px; margin-bottom: 14px; flex-wrap: wrap; }
+  .card h2 { margin: 0; font-size: 15px; font-weight: 700; }
+  .card .sub { font-size: 12px; color: var(--muted); }
+
+  /* Hero scoreboard */
+  .hero {
+    position: relative; overflow: hidden; border-radius: 24px; padding: 26px 28px;
+    background: linear-gradient(120deg, var(--hero-3), var(--surface-strong) 55%, var(--hero-3));
+    border: 1px solid var(--line); box-shadow: var(--shadow);
+    display: grid; grid-template-columns: minmax(200px, 0.9fr) minmax(0, 2fr); gap: 22px; align-items: center;
+  }
+  .hero::before, .hero::after {
+    content: ""; position: absolute; border-radius: 50%; filter: blur(8px); pointer-events: none;
+  }
+  .hero::before { width: 380px; height: 380px; right: -60px; top: -160px; background: radial-gradient(circle at 35% 35%, var(--hero-1), var(--hero-2) 55%, transparent 70%); opacity: .55; }
+  .hero::after { width: 260px; height: 260px; right: 300px; bottom: -170px; background: radial-gradient(circle, var(--hero-1), transparent 70%); opacity: .5; }
+  .hero > * { position: relative; }
+  .hero-eyebrow { font-size: 12px; font-weight: 700; letter-spacing: .08em; text-transform: uppercase; color: var(--accent); }
+  .hero h2 { margin: 6px 0 8px; font-size: 26px; line-height: 1.15; font-weight: 800; letter-spacing: -0.015em; text-wrap: balance; }
+  .hero p { margin: 0; color: var(--muted); max-width: 34ch; }
+  .hero-chips { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 16px; }
+  .chip {
+    display: inline-flex; align-items: center; gap: 6px; padding: 6px 12px; border-radius: 999px;
+    background: var(--surface-strong); border: 1px solid var(--line); font-size: 12px; font-weight: 600;
+    text-decoration: none; color: var(--ink);
+  }
+  .chip b { font-variant-numeric: tabular-nums; }
+  .chip.attention { background: var(--in_repair); color: #fff; border-color: transparent; }
+
+  .promises { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 14px; }
+  .promise {
+    border-radius: 22px; padding: 18px 18px 16px; text-align: center;
+    background: color-mix(in srgb, var(--surface-strong) 72%, transparent);
+    border: 1px solid var(--line); backdrop-filter: blur(10px);
+    display: grid; gap: 4px; justify-items: center;
+  }
+  .promise .ring {
+    width: 74px; height: 74px; border-radius: 50%; display: grid; place-items: center;
+    font-size: 30px; font-weight: 800; font-variant-numeric: tabular-nums;
+    background: var(--surface-sunk); border: 3px solid var(--received); color: var(--muted);
+  }
+  .promise.ok .ring { border-color: var(--settled); color: var(--settled); background: var(--ok-soft); }
+  .promise.bad .ring { border-color: var(--rejected); color: var(--rejected); background: var(--bad-soft); }
+  .promise .label { font-weight: 700; margin-top: 6px; }
+  .promise .what { font-size: 12px; color: var(--muted); line-height: 1.35; }
+  .promise .state { font-size: 12px; font-weight: 700; }
+  .promise.ok .state { color: var(--settled); }
+  .promise.bad .state { color: var(--rejected); }
+
+  /* Status tiles */
+  .tiles { display: grid; grid-template-columns: repeat(6, minmax(0, 1fr)); gap: 12px; }
+  .tile { padding: 14px 16px; border-radius: 16px; display: grid; gap: 2px; }
+  .tile .n { font-size: 24px; font-weight: 800; font-variant-numeric: tabular-nums; }
+  .tile .label { font-size: 12px; color: var(--muted); display: flex; align-items: center; gap: 6px; }
+  .tile .label::before { content: ""; width: 8px; height: 8px; border-radius: 3px; background: var(--c); }
+
+  .grid-2 { display: grid; grid-template-columns: minmax(0, 1.25fr) minmax(0, 1fr); gap: 18px; }
+  .grid-main { display: grid; grid-template-columns: minmax(0, 1.5fr) minmax(0, 1fr); gap: 18px; align-items: start; }
+  .stack { display: grid; gap: 18px; min-width: 0; }
+
+  /* Throughput bars */
+  .bars { display: flex; align-items: flex-end; gap: 4px; height: 140px; padding-top: 6px; }
+  .bars .bar { flex: 1; min-width: 3px; border-radius: 6px 6px 3px 3px; background: var(--accent-soft); position: relative; transition: height .4s; }
+  .bars .bar.recent { background: color-mix(in srgb, var(--accent) 55%, var(--accent-soft)); }
+  .bars .bar.now { background: var(--accent); }
+  .bars-axis { display: flex; justify-content: space-between; font-size: 11px; color: var(--muted); margin-top: 6px; }
+  .bars-figure { display: flex; align-items: baseline; gap: 8px; }
+  .bars-figure b { font-size: 26px; font-weight: 800; font-variant-numeric: tabular-nums; }
+
+  /* Buttons and segmented controls */
+  .group-label { font-size: 12px; font-weight: 600; color: var(--muted); margin: 0 0 8px; }
+  .row { display: flex; gap: 8px; flex-wrap: wrap; }
+  .btn {
+    padding: 8px 14px; border-radius: 999px; border: 1px solid var(--line); background: var(--surface-strong);
+    cursor: pointer; font-weight: 600; font-size: 13px;
+  }
+  .btn:hover { border-color: var(--accent); }
+  .btn.primary { background: var(--pill-dark); color: var(--pill-dark-ink); border-color: transparent; }
+  .btn.small { padding: 4px 10px; font-size: 12px; }
+  .segmented { display: inline-flex; padding: 4px; border-radius: 999px; background: var(--surface-sunk); gap: 2px; flex-wrap: wrap; }
+  .segmented button { border: 0; background: transparent; padding: 7px 14px; border-radius: 999px; cursor: pointer; font-weight: 600; font-size: 13px; color: var(--muted); }
+  .segmented button.active { background: var(--pill-dark); color: var(--pill-dark-ink); }
+  .hint { font-size: 12px; color: var(--muted); margin-top: 10px; }
+  .control-block + .control-block { margin-top: 18px; }
+
+  /* Rate limits */
+  .limit { display: grid; grid-template-columns: 52px minmax(0, 1fr); gap: 6px 12px; align-items: center; padding: 10px 0; }
+  .limit + .limit { border-top: 1px solid var(--line); }
+  .limit .rail { font-weight: 800; }
+  .meter { height: 10px; border-radius: 999px; background: var(--surface-sunk); overflow: hidden; }
+  .meter span { display: block; height: 100%; border-radius: 999px; background: linear-gradient(90deg, var(--accent), var(--hero-2)); transition: width .5s; }
+  .meter.full span { background: linear-gradient(90deg, var(--retrying), #f2c25a); }
+  .limit-info { grid-column: 2; display: flex; justify-content: space-between; align-items: center; gap: 8px; flex-wrap: wrap; font-size: 13px; }
+  .limit-info b { font-variant-numeric: tabular-nums; }
+
+  /* Workers */
+  .figures { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 10px; margin-bottom: 12px; }
+  .figure { background: var(--surface-sunk); border-radius: 14px; padding: 10px 12px; }
+  .figure b { display: block; font-size: 20px; font-weight: 800; font-variant-numeric: tabular-nums; }
+  .figure span { font-size: 12px; color: var(--muted); }
+  .lease { display: flex; justify-content: space-between; gap: 10px; padding: 7px 0; border-top: 1px solid var(--line); font-size: 13px; }
+  .lease.expired { color: var(--rejected); }
+
+  /* Transactions list */
+  .txns { display: grid; }
+  .txn {
+    display: grid; grid-template-columns: 38px minmax(0, 1fr) auto; gap: 12px; align-items: center;
+    padding: 10px 8px; border-radius: 14px; cursor: pointer; border: 0; background: transparent; text-align: left; width: 100%;
+  }
+  .txn:hover { background: var(--surface-sunk); }
+  .txn.flash { animation: flash 1.4s ease-out; }
+  @keyframes flash { from { background: var(--accent-soft); } to { background: transparent; } }
+  @media (prefers-reduced-motion: reduce) { .txn.flash { animation: none; } }
+  .avatar {
+    width: 38px; height: 38px; border-radius: 12px; display: grid; place-items: center;
+    font-weight: 700; font-size: 13px; color: #fff; background: var(--c);
+  }
+  .txn-main { min-width: 0; }
+  .txn-title { font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .txn-sub { font-size: 12px; color: var(--muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .txn-end { text-align: right; display: grid; gap: 4px; justify-items: end; }
+  .txn-amount { font-weight: 700; font-variant-numeric: tabular-nums; }
   .pill {
-    display: inline-block; padding: 1px 8px; border-radius: 999px; font-size: 12px; font-weight: 600;
-    color: var(--c); border: 1px solid var(--c);
+    display: inline-flex; align-items: center; padding: 2px 10px; border-radius: 999px; font-size: 11px; font-weight: 700;
+    color: var(--c); background: color-mix(in srgb, var(--c) 14%, transparent); white-space: nowrap;
   }
-  .mono { font-family: ui-monospace, Consolas, monospace; font-size: 12px; }
-  .limits { margin-bottom: 12px; }
-  .limit-row {
-    display: grid; grid-template-columns: 48px minmax(80px, 1fr) 130px auto;
-    gap: 12px; align-items: center; margin-bottom: 8px;
+
+  /* Repair + reconciliation */
+  .repair-item { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 4px 10px; align-items: center; padding: 10px 0; border-top: 1px solid var(--line); }
+  .repair-item:first-child { border-top: 0; }
+  .repair-why { grid-column: 1 / -1; font-size: 12px; color: var(--muted); }
+  .empty { color: var(--muted); font-size: 13px; padding: 6px 0; }
+  .verdict { display: flex; align-items: center; gap: 10px; padding: 12px 14px; border-radius: 14px; font-weight: 700; }
+  .verdict.ok { background: var(--ok-soft); color: var(--settled); }
+  .verdict.bad { background: var(--bad-soft); color: var(--rejected); }
+  .totals { width: 100%; border-collapse: collapse; margin-top: 12px; font-size: 13px; }
+  .totals th, .totals td { text-align: left; padding: 6px 4px; border-bottom: 1px solid var(--line); }
+  .totals th { font-size: 11px; font-weight: 600; color: var(--muted); text-transform: uppercase; letter-spacing: .05em; }
+  .totals td { font-variant-numeric: tabular-nums; }
+  .break-item { margin-top: 10px; padding: 10px 12px; border-radius: 12px; background: var(--bad-soft); font-size: 13px; }
+  .error { color: var(--rejected); font-size: 13px; }
+
+  /* Life-story drawer */
+  .scrim { position: fixed; inset: 0; background: rgba(10, 14, 28, 0.35); z-index: 20; }
+  .drawer {
+    position: fixed; top: 0; right: 0; bottom: 0; width: min(440px, 100vw); z-index: 21;
+    background: var(--surface-strong); box-shadow: -12px 0 40px rgba(10, 14, 28, 0.2);
+    padding: 22px 22px 32px; overflow-y: auto; display: grid; gap: 16px; align-content: start;
   }
-  @media (max-width: 600px) { .limit-row { grid-template-columns: 48px 1fr; } }
-  .bar { height: 10px; background: var(--line); border-radius: 5px; overflow: hidden; }
-  .bar > span { display: block; height: 100%; background: var(--processing); transition: width .6s; }
-  .bar.at-limit > span { background: var(--retrying); }
-  .speed { font-variant-numeric: tabular-nums; }
-  #recent tr { cursor: pointer; }
-  #recent tr:hover td { background: var(--bg); }
-  #recent tr.selected td { background: var(--flash); }
-  .history-panel { margin-bottom: 12px; }
-  .history-head { display: flex; justify-content: space-between; align-items: baseline; gap: 12px; flex-wrap: wrap; }
-  ol.trail { list-style: none; margin: 0; padding: 0; }
-  ol.trail li {
-    display: grid; grid-template-columns: 110px auto 1fr; gap: 4px 12px; align-items: baseline;
-    padding: 8px 0; border-bottom: 1px solid var(--line);
+  .drawer-head { display: flex; justify-content: space-between; align-items: start; gap: 12px; }
+  .drawer h2 { margin: 0; font-size: 22px; font-weight: 800; font-variant-numeric: tabular-nums; }
+  .story { list-style: none; margin: 0; padding: 0; display: grid; }
+  .story li { position: relative; padding: 0 0 18px 26px; display: grid; gap: 2px; }
+  .story li::before {
+    content: ""; position: absolute; left: 4px; top: 6px; width: 10px; height: 10px; border-radius: 50%;
+    background: var(--c); box-shadow: 0 0 0 4px color-mix(in srgb, var(--c) 18%, transparent);
   }
-  ol.trail li:last-child { border-bottom: 0; }
-  ol.trail .when { font-variant-numeric: tabular-nums; color: var(--muted); font-size: 12px; }
-  ol.trail .change { display: flex; gap: 6px; align-items: center; white-space: nowrap; }
-  ol.trail .who { font-size: 12px; }
-  ol.trail .why { grid-column: 3; color: var(--muted); font-size: 12px; }
-  @media (max-width: 600px) { ol.trail li { grid-template-columns: 1fr; } ol.trail .why { grid-column: 1; } }
-  .recon { margin-bottom: 12px; }
-  .recon-verdict { font-size: 18px; font-weight: 650; margin: 4px 0 10px; }
-  .recon-verdict.ok { color: var(--settled); }
-  .recon-verdict.bad { color: var(--rejected); }
-  .recon-figures { display: flex; gap: 18px; flex-wrap: wrap; margin-bottom: 10px; }
-  .recon-figures b { font-size: 20px; font-variant-numeric: tabular-nums; }
-  .recon-break { border-left: 3px solid var(--rejected); padding: 6px 10px; margin-top: 8px; }
-  .empty { color: var(--muted); padding: 8px 0; }
-  .error { color: var(--rejected); }
+  .story li::after { content: ""; position: absolute; left: 8.5px; top: 20px; bottom: 0; width: 1.5px; background: var(--line); }
+  .story li:last-child::after { display: none; }
+  .story .when { font-size: 12px; color: var(--muted); font-variant-numeric: tabular-nums; }
+  .story .what { font-weight: 700; }
+  .story .why { font-size: 13px; color: var(--muted); }
+  .story .who { font-size: 11px; }
+
+  [hidden] { display: none !important; }
+
+  @media (max-width: 1180px) {
+    .tiles { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+    .hero { grid-template-columns: 1fr; }
+  }
+  @media (max-width: 960px) {
+    .app { grid-template-columns: 1fr; }
+    .sidebar {
+      position: static; height: auto; flex-direction: row; align-items: center; flex-wrap: wrap;
+      gap: 12px 18px; border-right: 0; border-bottom: 1px solid var(--line); padding: 14px 16px;
+    }
+    .sidebar .nav-section, .sidebar .footnote { display: none; }
+    .system { margin: 0 0 0 auto; grid-auto-flow: column; padding: 8px 12px; gap: 14px; }
+    .grid-2, .grid-main { grid-template-columns: 1fr; }
+    main { padding: 18px 16px 40px; }
+  }
+  @media (max-width: 560px) {
+    .tiles { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+    .promises { grid-template-columns: 1fr; }
+    .promise { grid-template-columns: auto 1fr; text-align: left; justify-items: start; align-items: center; column-gap: 14px; }
+    .promise .ring { grid-row: span 3; width: 58px; height: 58px; font-size: 24px; }
+    .promise .label { margin-top: 0; }
+    .system { margin-left: 0; }
+    .hero { padding: 20px 18px; }
+  }
 </style>
 </head>
 <body>
-<main>
-  <header>
-    <h1>Settlement Engine</h1>
-    <span class="live"><span class="dot" id="dot"></span><span id="live-text">live</span></span>
-  </header>
+<div class="app">
+  <aside class="sidebar">
+    <div class="brand"><span class="brand-mark">S</span>Settlement Engine</div>
+    <div class="nav-section">
+      <div class="nav-label">Overview</div>
+      <nav class="nav">
+        <a href="#promises"><span class="dot"></span>Promises</a>
+        <a href="#activity"><span class="dot"></span>Activity</a>
+        <a href="#controls"><span class="dot"></span>Control room</a>
+        <a href="#payments"><span class="dot"></span>Payments</a>
+      </nav>
+    </div>
+    <div class="nav-section">
+      <div class="nav-label">Operations</div>
+      <nav class="nav">
+        <a href="#limits"><span class="dot"></span>Rate limits</a>
+        <a href="#workers"><span class="dot"></span>Workers</a>
+        <a href="#repair"><span class="dot"></span>Repair queue</a>
+        <a href="#reconciliation"><span class="dot"></span>Reconciliation</a>
+      </nav>
+    </div>
+    <div class="system" aria-label="System status">
+      <div class="system-row"><span><span class="light" id="light-api"></span>API</span></div>
+      <div class="system-row"><span><span class="light" id="light-redis"></span>Redis</span></div>
+      <div class="system-row"><span><span class="light" id="light-network"></span>Network</span></div>
+    </div>
+    <div class="footnote">Local demo. The payment network is simulated; no real money moves.</div>
+  </aside>
 
-  <section class="grid tiles" id="tiles"></section>
+  <main>
+    <div class="topbar">
+      <h1>Overview</h1>
+      <span class="live" id="live"><span class="pulse"></span><span id="live-text">Live, refreshed every second</span></span>
+    </div>
 
-  <section class="grid row2">
-    <div class="panel">
-      <h2>Send payments</h2>
-      <div class="buttons">
-        <button data-send="1">Send 1</button>
-        <button data-send="10">Send 10</button>
-        <button data-send="50">Send 50</button>
+    <section class="hero" id="promises">
+      <div>
+        <div class="hero-eyebrow">The promises</div>
+        <h2>Never lose a payment. Never pay one twice.</h2>
+        <p>Checked live against the payment network's own records while you break things below.</p>
+        <div class="hero-chips">
+          <a class="chip" href="#repair" id="chip-repair">Needs a person <b id="needs-person">0</b></a>
+          <span class="chip">Resends absorbed <b id="resends">0</b></span>
+        </div>
       </div>
-      <div class="hint">Random FPS and SEPA payments. About 1 in 10 FPS payments go to a closed account, which the rail rejects (AC04).</div>
-    </div>
-    <div class="panel">
-      <h2>Rail behaviour</h2>
-      <div class="buttons" id="chaos-buttons"></div>
-      <div class="hint" id="chaos-hint"></div>
-    </div>
-  </section>
+      <div class="promises">
+        <div class="promise" id="promise-lost">
+          <div class="ring">–</div>
+          <div class="label">Lost</div>
+          <div class="state"></div>
+          <div class="what">We and the network disagree on a payment</div>
+        </div>
+        <div class="promise" id="promise-twice">
+          <div class="ring">–</div>
+          <div class="label">Sent twice</div>
+          <div class="state"></div>
+          <div class="what">The network moved the same money twice</div>
+        </div>
+        <div class="promise" id="promise-stuck">
+          <div class="ring">–</div>
+          <div class="label">Stuck</div>
+          <div class="state"></div>
+          <div class="what">In flight, idle 2+ minutes, nothing will pick it up</div>
+        </div>
+      </div>
+    </section>
 
-  <section class="panel limits">
-    <h2>Rate limits (per rail, shared by all workers)</h2>
-    <div id="limits"></div>
-    <div class="hint">Bar = payments finished per second over the last 5s. Over the limit, a payment is parked until its booked slot (it shows in "waiting to retry"), not counted as a failed attempt.</div>
-  </section>
+    <section class="tiles" id="tiles" aria-label="Payments by status"></section>
 
-  <section class="grid row2">
-    <div class="panel">
-      <h2>Redis right now</h2>
-      <div class="queue" id="queue"></div>
-      <div id="leases"></div>
-    </div>
-    <div class="panel">
-      <h2>Repair queue</h2>
-      <div id="repair"></div>
-    </div>
-  </section>
+    <section class="grid-2" id="activity">
+      <div class="card">
+        <div class="card-head">
+          <div>
+            <h2>Settled per second</h2>
+            <div class="sub">Last 60 seconds, measured by this page</div>
+          </div>
+          <div class="bars-figure"><b id="rate-now">0</b><span class="muted">/s now</span></div>
+        </div>
+        <div class="bars" id="bars"></div>
+        <div class="bars-axis"><span>60 s ago</span><span>now</span></div>
+      </div>
 
-  <section class="panel recon">
-    <div class="history-head">
-      <h2>End-of-day reconciliation</h2>
-      <button class="small" id="recon-run">Reconcile today</button>
-    </div>
-    <div id="recon"><div class="hint">Compares our ledger with the payment network's own records, payment by payment, for today (UTC). Press the button to run it.</div></div>
-  </section>
+      <div class="card" id="controls">
+        <div class="card-head"><h2>Control room</h2></div>
+        <div class="control-block">
+          <div class="group-label">Send test payments</div>
+          <div class="row">
+            <button class="btn" data-send="1">Send 1</button>
+            <button class="btn" data-send="10">Send 10</button>
+            <button class="btn primary" data-send="50">Send 50</button>
+          </div>
+          <div class="hint">Random FPS and SEPA payments. About 1 in 10 FPS ones go to a closed account (rejected, AC04).</div>
+        </div>
+        <div class="control-block">
+          <div class="group-label">Payment network</div>
+          <div class="segmented" id="chaos" role="group" aria-label="Payment network behaviour"></div>
+          <div class="hint" id="chaos-hint"></div>
+        </div>
+      </div>
+    </section>
 
-  <section class="panel history-panel" id="history-panel" hidden>
-    <div class="history-head">
-      <h2>History of <span class="mono" id="history-title"></span></h2>
-      <button class="small" id="history-close">Close</button>
-    </div>
-    <ol class="trail" id="history"></ol>
-    <div class="hint">The audit trail: every change, who made it and why. Recorded with the change itself, and the database refuses to edit or delete it.</div>
-  </section>
+    <section class="grid-2">
+      <div class="card" id="limits">
+        <div class="card-head">
+          <div>
+            <h2>Rate limits</h2>
+            <div class="sub">Per network, shared by every worker</div>
+          </div>
+        </div>
+        <div id="limit-rows"></div>
+      </div>
 
-  <section class="panel">
-    <h2>Recent payments <span class="hint">(click one to see its history)</span></h2>
-    <div class="table-wrap">
-      <table>
-        <thead><tr><th>UETR</th><th>Rail</th><th>Amount</th><th>Status</th><th>Attempts</th><th>Updated</th><th>Detail</th></tr></thead>
-        <tbody id="recent"></tbody>
-      </table>
+      <div class="card" id="workers">
+        <div class="card-head">
+          <div>
+            <h2>Workers and queue</h2>
+            <div class="sub">What Redis holds right now</div>
+          </div>
+        </div>
+        <div class="figures" id="queue-figures"></div>
+        <div id="leases"></div>
+      </div>
+    </section>
+
+    <section class="grid-main">
+      <div class="card" id="payments">
+        <div class="card-head">
+          <div>
+            <h2>Recent payments</h2>
+            <div class="sub">Click one to see its life story</div>
+          </div>
+        </div>
+        <div class="txns" id="txns"></div>
+      </div>
+
+      <div class="stack">
+        <div class="card" id="repair">
+          <div class="card-head">
+            <div>
+              <h2>Repair queue</h2>
+              <div class="sub">Out of attempts, waiting for a person</div>
+            </div>
+          </div>
+          <div id="repair-list"></div>
+        </div>
+
+        <div class="card" id="reconciliation">
+          <div class="card-head">
+            <div>
+              <h2>End-of-day reconciliation</h2>
+              <div class="sub">Our ledger vs the network's records, today (UTC)</div>
+            </div>
+            <button class="btn small primary" id="recon-run">Reconcile today</button>
+          </div>
+          <div id="recon"><div class="empty">Compares every payment of the day with the network's own records. Press the button to run it.</div></div>
+        </div>
+      </div>
+    </section>
+  </main>
+</div>
+
+<div class="scrim" id="scrim" hidden></div>
+<aside class="drawer" id="drawer" hidden aria-label="Payment life story">
+  <div class="drawer-head">
+    <div>
+      <div class="sub muted" id="drawer-route"></div>
+      <h2 id="drawer-amount"></h2>
+      <div class="mono muted" id="drawer-uetr"></div>
     </div>
-  </section>
-</main>
+    <button class="btn small" id="drawer-close">Close</button>
+  </div>
+  <ol class="story" id="story"></ol>
+  <div class="hint">From the audit trail: every change, who made it and why. The database refuses to edit or delete it.</div>
+</aside>
 
 <script>
 const STATUSES = ["received", "processing", "retrying", "settled", "rejected", "in_repair"];
@@ -180,19 +506,26 @@ const LABELS = {
 };
 const CHAOS_PRESETS = [
   { name: "Healthy", settings: { latency_ms: 150 },
-    hint: "Every payment settles, 150 ms each so you can watch them move." },
+    hint: "Every payment settles, 150 ms each, so you can watch them move." },
   { name: "Flaky", settings: { latency_ms: 150, failure_rate: 0.3 },
-    hint: "30% of sends fail with 503. Watch payments go to Retrying and back, with growing waits." },
+    hint: "30% of sends fail. Payments retry with growing waits, then settle." },
   { name: "Down", settings: { failure_rate: 1 },
-    hint: "Every send fails. Payments retry with backoff, then land in the repair queue. Switch back to Healthy and resubmit them." },
+    hint: "Every send fails. After 5 attempts payments go to the repair queue. Switch back to Healthy and resubmit." },
   { name: "Loses answers", settings: { latency_ms: 150, drop_response_rate: 0.3, hang_seconds: 3 },
-    hint: "30% of payments settle at the rail but the answer never arrives (2s timeout). The retry asks again and the rail confirms: paid once." },
+    hint: "30% of payments settle but the reply is lost. The retry asks again with the same ID: paid once." },
 ];
+const LIMIT_CHOICES = [2, 5, 10, 50];
+const AVATAR_COLOURS = ["#5b63f0", "#1d9f6a", "#d9941a", "#9758ec", "#e04848", "#2f9bd6"];
+const BAR_COUNT = 60;
+
 const lastStatus = new Map();
+const rates = [];
+let lastFinished = null;
+let selected = null;
 
 // The page redraws every second. A redraw between pressing and releasing
-// the mouse replaces the button under it, and the browser drops the click.
-// So don't redraw while a pointer is down.
+// the mouse replaces the button under it and the click is lost, so don't
+// redraw while a pointer is down.
 let pointerDown = false;
 document.addEventListener("pointerdown", () => { pointerDown = true; });
 document.addEventListener("pointerup", () => setTimeout(() => { pointerDown = false; }, 0));
@@ -202,215 +535,195 @@ function el(tag, attrs = {}, ...children) {
   for (const [key, value] of Object.entries(attrs)) {
     if (key === "style") node.style.cssText = value;
     else if (key.startsWith("on")) node.addEventListener(key.slice(2), value);
-    else node.setAttribute(key, value);
+    else if (value !== null && value !== undefined && value !== false) node.setAttribute(key, value);
   }
-  for (const child of children) node.append(child);
+  for (const child of children) if (child !== null && child !== undefined && child !== "") node.append(child);
   return node;
 }
 
-function pill(status) {
-  return el("span", { class: "pill", style: `--c: var(--${status})` }, LABELS[status] || status);
+const pill = status => el("span", { class: "pill", style: `--c: var(--${status})` }, LABELS[status] || status);
+
+function money(amount, currency) {
+  const symbol = { GBP: "£", EUR: "€" }[currency] || `${currency} `;
+  return symbol + Number(amount).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 });
 }
 
 function ago(iso) {
   const seconds = Math.max(0, Math.round((Date.now() - new Date(iso)) / 1000));
   if (seconds < 60) return `${seconds}s ago`;
   if (seconds < 3600) return `${Math.round(seconds / 60)}m ago`;
-  return `${Math.round(seconds / 3600)}h ago`;
+  if (seconds < 86400) return `${Math.round(seconds / 3600)}h ago`;
+  return `${Math.round(seconds / 86400)}d ago`;
 }
 
-function money(p) {
-  return `${p.currency === "GBP" ? "£" : "€"}${Number(p.amount).toLocaleString(undefined, { minimumFractionDigits: 2 })}`;
+function initials(name) {
+  return name.split(/\s+/).filter(Boolean).slice(0, 2).map(w => w[0].toUpperCase()).join("");
 }
+
+function colourFor(name) {
+  let hash = 0;
+  for (const ch of name) hash = (hash * 31 + ch.charCodeAt(0)) >>> 0;
+  return AVATAR_COLOURS[hash % AVATAR_COLOURS.length];
+}
+
+function setLight(id, state) {
+  document.getElementById(id).className = `light ${state}`;
+}
+
+// --- promises ---------------------------------------------------------------
+
+function renderPromise(id, value, okText, badText) {
+  const box = document.getElementById(id);
+  const ring = box.querySelector(".ring");
+  const state = box.querySelector(".state");
+  if (value === null || value === undefined) {
+    box.className = "promise";
+    ring.textContent = "?";
+    state.textContent = "Can't check right now";
+    return;
+  }
+  box.className = `promise ${value === 0 ? "ok" : "bad"}`;
+  ring.textContent = String(value);
+  state.textContent = value === 0 ? okText : badText;
+}
+
+async function refreshScoreboard() {
+  try {
+    const response = await fetch("/scoreboard");
+    if (!response.ok) throw new Error(response.status);
+    const board = await response.json();
+    renderPromise("promise-lost", board.lost, "All accounted for", "Needs a person");
+    renderPromise("promise-twice", board.sent_twice, "Never", "Investigate now");
+    renderPromise("promise-stuck", board.stuck, "Nothing stuck", "Recovery isn't running");
+    document.getElementById("needs-person").textContent = board.needs_person;
+    document.getElementById("chip-repair").classList.toggle("attention", board.needs_person > 0);
+    document.getElementById("resends").textContent = board.resends_absorbed ?? "?";
+  } catch {
+    for (const id of ["promise-lost", "promise-twice", "promise-stuck"]) renderPromise(id, null);
+  }
+}
+
+// --- the once-a-second refresh ------------------------------------------------
 
 function renderTiles(counts) {
   document.getElementById("tiles").replaceChildren(...STATUSES.map(status =>
-    el("div", { class: "panel tile", style: `--c: var(--${status})` },
-      el("div", { class: "n" }, String(counts[status] ?? 0)),
+    el("div", { class: "card tile", style: `--c: var(--${status})` },
+      el("div", { class: "n" }, (counts[status] ?? 0).toLocaleString()),
       el("div", { class: "label" }, LABELS[status]))));
 }
 
-function renderQueue(queue) {
-  const box = document.getElementById("queue");
-  const leases = document.getElementById("leases");
-  if (queue.error) {
-    box.replaceChildren(el("span", { class: "error" }, queue.error));
-    leases.replaceChildren();
+function renderBars(counts) {
+  const finished = (counts.settled ?? 0);
+  if (lastFinished !== null) rates.push(Math.max(0, finished - lastFinished));
+  lastFinished = finished;
+  while (rates.length > BAR_COUNT) rates.shift();
+  const padded = Array(BAR_COUNT - rates.length).fill(0).concat(rates);
+  const top = Math.max(1, ...padded);
+  document.getElementById("bars").replaceChildren(...padded.map((value, i) => el("div", {
+    class: `bar${i === BAR_COUNT - 1 ? " now" : i >= BAR_COUNT - 10 ? " recent" : ""}`,
+    style: `height: ${Math.max(3, (value / top) * 100)}%`,
+    title: `${value} settled`,
+  })));
+  document.getElementById("rate-now").textContent = rates.length ? rates[rates.length - 1] : 0;
+}
+
+function renderChaos(rail) {
+  const box = document.getElementById("chaos");
+  const hint = document.getElementById("chaos-hint");
+  setLight("light-network", rail.reachable ? "up" : "down");
+  if (!rail.reachable) {
+    box.replaceChildren();
+    hint.replaceChildren(el("span", { class: "error" }, "Payment network unreachable. Start it with: uvicorn rail_sim.main:app --port 9000"));
     return;
   }
-  box.replaceChildren(
-    el("div", {}, el("b", {}, String(queue.ready)), el("div", { class: "hint" }, "waiting in queue")),
-    el("div", {}, el("b", {}, String(queue.in_progress)), el("div", { class: "hint" }, "being worked on")),
-    el("div", {}, el("b", {}, String(queue.waiting_to_retry)), el("div", { class: "hint" }, "waiting to retry or for a rate-limit slot")));
-  leases.replaceChildren(queue.leases.length
-    ? el("table", {},
-        el("thead", {}, el("tr", {}, el("th", {}, "Payment"), el("th", {}, "Worker"), el("th", {}, "Lease left"))),
-        el("tbody", {}, ...queue.leases.map(lease => el("tr", {},
-          el("td", { class: "mono" }, lease.uetr.slice(0, 8)),
-          el("td", { class: "mono" }, lease.worker),
-          el("td", {}, `${lease.seconds_left}s`)))))
-    : el("div", { class: "empty" }, "No worker is holding a payment right now."));
+  const normalise = s => JSON.stringify({ latency_ms: 0, failure_rate: 0, drop_response_rate: 0, hang_seconds: 5, ...s });
+  const current = normalise(rail.chaos);
+  const active = CHAOS_PRESETS.find(p => normalise(p.settings) === current);
+  box.replaceChildren(...CHAOS_PRESETS.map(preset => el("button", {
+    class: preset === active ? "active" : "", "aria-pressed": String(preset === active),
+    onclick: () => put("/demo/chaos", preset.settings),
+  }, preset.name)));
+  hint.textContent = active ? active.hint : "Custom settings.";
 }
-
-async function runReconciliation() {
-  const box = document.getElementById("recon");
-  box.replaceChildren(el("div", { class: "hint" }, "Comparing records..."));
-  const response = await fetch("/reconciliation");
-  if (!response.ok) {
-    box.replaceChildren(el("div", { class: "error" }, (await response.json()).detail || "Reconciliation failed"));
-    return;
-  }
-  const report = await response.json();
-  const totals = currency => {
-    const ours = report.settled_totals.ours[currency] || { count: 0, amount: "0" };
-    const theirs = report.settled_totals.network[currency] || { count: 0, amount: "0" };
-    return el("tr", {},
-      el("td", {}, currency),
-      el("td", {}, `${ours.count} payments, ${ours.amount}`),
-      el("td", {}, `${theirs.count} payments, ${theirs.amount}`));
-  };
-  const currencies = [...new Set([
-    ...Object.keys(report.settled_totals.ours), ...Object.keys(report.settled_totals.network)])].sort();
-  const pending = Object.entries(report.pending).map(([s, n]) => `${n} ${LABELS[s] || s}`).join(", ") || "none";
-  box.replaceChildren(
-    el("div", { class: `recon-verdict ${report.balanced ? "ok" : "bad"}` },
-      report.balanced ? `Balanced: we and the network agree (${report.day})`
-        : report.breaks.length === 1 ? `Not balanced: 1 break needs a person (${report.day})`
-        : `Not balanced: ${report.breaks.length} breaks need a person (${report.day})`),
-    el("div", { class: "recon-figures" },
-      el("div", {}, el("b", {}, String(report.matched)), el("div", { class: "hint" }, "matched")),
-      el("div", {}, el("b", {}, String(report.breaks.length)), el("div", { class: "hint" }, "breaks")),
-      el("div", {}, el("b", {}, String(report.resends_absorbed)), el("div", { class: "hint" }, "resends the network absorbed")),
-      el("div", {}, el("div", { class: "hint" }, `pending: ${pending}`))),
-    el("table", {},
-      el("thead", {}, el("tr", {}, el("th", {}, "Settled"), el("th", {}, "Our ledger"), el("th", {}, "Payment network"))),
-      el("tbody", {}, ...currencies.map(totals))),
-    ...report.breaks.map(b => el("div", { class: "recon-break" },
-      el("div", {}, el("span", { class: "mono" }, b.uetr), " ", el("b", {}, b.explanation)),
-      el("div", { class: "hint" }, `ours: ${b.our_status || "no record"} ${b.our_amount || ""} · network: ${b.network_status || "no record"} ${b.network_amount || ""}`))));
-}
-
-document.getElementById("recon-run").addEventListener("click", runReconciliation);
-
-let selected = null;
-
-function showHistory(uetr) {
-  selected = uetr;
-  document.getElementById("history-panel").hidden = false;
-  document.getElementById("history-title").textContent = uetr;
-  refresh();
-}
-
-document.getElementById("history-close").addEventListener("click", () => {
-  selected = null;
-  document.getElementById("history-panel").hidden = true;
-  refresh();
-});
-
-async function renderHistory() {
-  if (!selected) return;
-  const response = await fetch(`/payments/${selected}/history`);
-  if (!response.ok) return;
-  const events = await response.json();
-  document.getElementById("history").replaceChildren(...events.map(e => el("li", {},
-    el("span", { class: "when" }, new Date(e.at).toLocaleTimeString(undefined, { hour12: false }) +
-      "." + String(new Date(e.at).getMilliseconds()).padStart(3, "0")),
-    el("span", { class: "change" },
-      e.from_status && e.from_status !== e.to_status ? pill(e.from_status) : "",
-      e.from_status && e.from_status !== e.to_status ? "→" : "",
-      pill(e.to_status),
-      el("span", { class: "hint" }, `attempt ${e.attempt}`)),
-    el("span", { class: "who mono" }, e.actor),
-    el("span", { class: "why" }, e.reason || ""))));
-}
-
-const LIMIT_CHOICES = [2, 5, 10, 50];
 
 function renderLimits(limits) {
-  const box = document.getElementById("limits");
+  const box = document.getElementById("limit-rows");
   const rails = Object.entries(limits || {});
   if (!rails.length) {
-    box.replaceChildren(el("div", { class: "error" }, "Rate limits unavailable (Redis unreachable)"));
+    box.replaceChildren(el("div", { class: "error" }, "Rate limits unavailable: Redis unreachable."));
     return;
   }
-  box.replaceChildren(...rails.map(([rail, { limit_per_second: limit, actual_per_second: actual }]) => {
-    const fill = Math.min(100, (actual / limit) * 100);
-    return el("div", { class: "limit-row" },
-      el("b", {}, rail),
-      el("div", { class: `bar${fill >= 90 ? " at-limit" : ""}` }, el("span", { style: `width: ${fill}%` })),
-      el("span", { class: "speed" }, `${actual.toFixed(1)} / ${limit} per sec`),
-      el("div", { class: "buttons" }, ...LIMIT_CHOICES.map(choice => el("button", {
-        class: `small${choice === limit ? " active" : ""}`,
-        onclick: () => setLimit(rail, choice),
-      }, String(choice)))));
+  box.replaceChildren(...rails.map(([rail, l]) => {
+    const fill = Math.min(100, (l.actual_per_second / l.limit_per_second) * 100);
+    return el("div", { class: "limit" },
+      el("div", { class: "rail" }, rail),
+      el("div", { class: `meter${fill >= 90 ? " full" : ""}` }, el("span", { style: `width: ${fill}%` })),
+      el("div", { class: "limit-info" },
+        el("span", {},
+          el("b", {}, `${l.actual_per_second.toFixed(1)} / ${l.limit_per_second}`), " per sec",
+          l.waiting_for_slot ? el("span", { class: "muted" }, ` · ${l.waiting_for_slot} waiting`) : ""),
+        el("span", { class: "row" }, ...LIMIT_CHOICES.map(choice => el("button", {
+          class: `btn small${choice === l.limit_per_second ? " primary" : ""}`,
+          onclick: () => put("/demo/rate-limits", { rail, per_second: choice }),
+        }, String(choice))))));
   }));
 }
 
-async function setLimit(rail, perSecond) {
-  await fetch("/demo/rate-limits", {
-    method: "PUT", headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ rail, per_second: perSecond }),
-  });
-  refresh();
+function renderQueue(queue) {
+  const figures = document.getElementById("queue-figures");
+  const leases = document.getElementById("leases");
+  if (queue.error) {
+    setLight("light-redis", "down");
+    figures.replaceChildren(el("div", { class: "error" }, queue.error));
+    leases.replaceChildren();
+    return;
+  }
+  setLight("light-redis", "up");
+  figures.replaceChildren(
+    el("div", { class: "figure" }, el("b", {}, String(queue.ready)), el("span", {}, "waiting in queue")),
+    el("div", { class: "figure" }, el("b", {}, String(queue.in_progress)), el("span", {}, "being worked on")),
+    el("div", { class: "figure" }, el("b", {}, String(queue.waiting_to_retry)), el("span", {}, "retry or rate-limit wait")));
+  leases.replaceChildren(...(queue.leases.length
+    ? queue.leases.map(l => el("div", { class: `lease${l.seconds_left < 0 ? " expired" : ""}` },
+        el("span", { class: "mono" }, l.uetr.slice(0, 8)),
+        el("span", { class: "mono muted" }, l.worker),
+        el("span", { class: "num" }, l.seconds_left < 0 ? "expired" : `${l.seconds_left}s left`)))
+    : [el("div", { class: "empty" }, "No worker is holding a payment right now.")]));
+}
+
+function renderPayments(payments) {
+  const box = document.getElementById("txns");
+  if (!payments.length) {
+    box.replaceChildren(el("div", { class: "empty" }, "No payments yet. Press Send 10 in the control room."));
+    return;
+  }
+  box.replaceChildren(...payments.map(p => {
+    const changed = lastStatus.has(p.uetr) && lastStatus.get(p.uetr) !== p.status;
+    lastStatus.set(p.uetr, p.status);
+    const detail = p.rejection_reason ? `rejected: ${p.rejection_reason}` : p.last_error;
+    return el("button", { class: `txn${changed ? " flash" : ""}`, onclick: () => openStory(p) },
+      el("span", { class: "avatar", style: `--c: ${colourFor(p.debtor_name)}` }, initials(p.debtor_name)),
+      el("span", { class: "txn-main" },
+        el("div", { class: "txn-title" }, `${p.debtor_name} → ${p.creditor_name}`),
+        el("div", { class: "txn-sub" },
+          `${p.rail} · ${ago(p.updated_at)} · attempt ${p.attempts}`, detail ? ` · ${detail}` : "")),
+      el("span", { class: "txn-end" },
+        el("span", { class: "txn-amount" }, money(p.amount, p.currency)),
+        pill(p.status)));
+  }));
 }
 
 function renderRepair(payments) {
-  const box = document.getElementById("repair");
+  const box = document.getElementById("repair-list");
   if (!payments.length) {
     box.replaceChildren(el("div", { class: "empty" }, "Empty. Nothing needs a person."));
     return;
   }
-  box.replaceChildren(el("table", {},
-    el("thead", {}, el("tr", {}, el("th", {}, "Payment"), el("th", {}, "Amount"), el("th", {}, "Why"), el("th", {}, ""))),
-    el("tbody", {}, ...payments.map(p => el("tr", {},
-      el("td", { class: "mono" }, p.uetr.slice(0, 8)),
-      el("td", {}, money(p)),
-      el("td", { class: "wrap" }, p.last_error || ""),
-      el("td", {}, el("button", { class: "small", onclick: () => resubmit(p.uetr) }, "Resubmit")))))));
-}
-
-function renderRecent(payments) {
-  document.getElementById("recent").replaceChildren(...payments.map(p => {
-    const changed = lastStatus.has(p.uetr) && lastStatus.get(p.uetr) !== p.status;
-    lastStatus.set(p.uetr, p.status);
-    const detail = p.rejection_reason ? `rejected: ${p.rejection_reason}` : (p.last_error || "");
-    const classes = [changed ? "flash" : "", p.uetr === selected ? "selected" : ""].join(" ").trim();
-    return el("tr", { class: classes, onclick: () => showHistory(p.uetr) },
-      el("td", { class: "mono" }, p.uetr.slice(0, 8)),
-      el("td", {}, p.rail),
-      el("td", {}, money(p)),
-      el("td", {}, pill(p.status)),
-      el("td", {}, String(p.attempts)),
-      el("td", {}, ago(p.updated_at)),
-      el("td", { class: "wrap" }, detail));
-  }));
-  if (!payments.length) {
-    document.getElementById("recent").replaceChildren(
-      el("tr", {}, el("td", { class: "empty", colspan: "7" }, "No payments yet. Press Send 10.")));
-  }
-}
-
-function renderChaos(rail) {
-  const hint = document.getElementById("chaos-hint");
-  const buttons = document.getElementById("chaos-buttons");
-  if (!rail.reachable) {
-    buttons.replaceChildren();
-    hint.replaceChildren(el("span", { class: "error" },
-      "Rail simulator unreachable. Start it with: uvicorn rail_sim.main:app --port 9000"));
-    return;
-  }
-  const current = JSON.stringify(normalise(rail.chaos));
-  const active = CHAOS_PRESETS.find(p => JSON.stringify(normalise(p.settings)) === current);
-  buttons.replaceChildren(...CHAOS_PRESETS.map(preset => el("button", {
-    class: preset === active ? "active" : "",
-    onclick: () => setChaos(preset.settings),
-  }, preset.name)));
-  hint.textContent = active ? active.hint : `Custom settings: ${current}`;
-}
-
-function normalise(settings) {
-  const defaults = { latency_ms: 0, failure_rate: 0, drop_response_rate: 0, hang_seconds: 5 };
-  return { ...defaults, ...settings };
+  box.replaceChildren(...payments.map(p => el("div", { class: "repair-item" },
+    el("div", {}, el("b", {}, money(p.amount, p.currency)), " ",
+      el("span", { class: "muted" }, `${p.debtor_name} → ${p.creditor_name}`)),
+    el("button", { class: "btn small primary", onclick: () => post(`/payments/${p.uetr}/resubmit`) }, "Resubmit"),
+    el("div", { class: "repair-why" }, p.last_error || "no reason recorded"))));
 }
 
 async function refresh() {
@@ -419,42 +732,130 @@ async function refresh() {
     if (!response.ok) throw new Error(response.status);
     const data = await response.json();
     if (pointerDown) return;
+    setLight("light-api", "up");
+    document.getElementById("live").classList.remove("offline");
+    document.getElementById("live-text").textContent = "Live, refreshed every second";
     renderTiles(data.counts);
-    renderQueue(data.queue);
-    renderLimits(data.rate_limits);
-    renderRepair(data.repair_queue);
-    renderRecent(data.recent);
-    await renderHistory();
+    renderBars(data.counts);
     renderChaos(data.rail);
-    document.getElementById("dot").classList.remove("down");
-    document.getElementById("live-text").textContent = "live";
+    renderLimits(data.rate_limits);
+    renderQueue(data.queue);
+    renderPayments(data.recent);
+    renderRepair(data.repair_queue);
+    if (selected) await renderStory();
   } catch {
-    document.getElementById("dot").classList.add("down");
+    setLight("light-api", "down");
+    document.getElementById("live").classList.add("offline");
     document.getElementById("live-text").textContent = "API unreachable";
   }
 }
 
-async function send(count) {
-  await fetch(`/demo/payments?count=${count}`, { method: "POST" });
+// --- actions ------------------------------------------------------------------
+
+async function put(url, body) {
+  await fetch(url, { method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
   refresh();
 }
 
-async function setChaos(settings) {
-  await fetch("/demo/chaos", {
-    method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify(settings),
-  });
+async function post(url) {
+  await fetch(url, { method: "POST" });
   refresh();
-}
-
-async function resubmit(uetr) {
-  await fetch(`/payments/${uetr}/resubmit`, { method: "POST" });
-  refresh();
+  refreshScoreboard();
 }
 
 document.querySelectorAll("[data-send]").forEach(button =>
-  button.addEventListener("click", () => send(button.dataset.send)));
+  button.addEventListener("click", () => post(`/demo/payments?count=${button.dataset.send}`)));
+
+// --- life story drawer --------------------------------------------------------
+
+function openStory(payment) {
+  selected = payment.uetr;
+  document.getElementById("drawer-route").textContent = `${payment.debtor_name} → ${payment.creditor_name} · ${payment.rail}`;
+  document.getElementById("drawer-amount").textContent = money(payment.amount, payment.currency);
+  document.getElementById("drawer-uetr").textContent = payment.uetr;
+  document.getElementById("story").replaceChildren(el("li", { style: "--c: var(--received)" }, el("span", { class: "why" }, "Loading...")));
+  document.getElementById("drawer").hidden = false;
+  document.getElementById("scrim").hidden = false;
+  renderStory();
+}
+
+function closeStory() {
+  selected = null;
+  document.getElementById("drawer").hidden = true;
+  document.getElementById("scrim").hidden = true;
+}
+
+document.getElementById("drawer-close").addEventListener("click", closeStory);
+document.getElementById("scrim").addEventListener("click", closeStory);
+document.addEventListener("keydown", e => { if (e.key === "Escape") closeStory(); });
+
+async function renderStory() {
+  const uetr = selected;
+  const response = await fetch(`/payments/${uetr}/history`);
+  if (!response.ok || uetr !== selected) return;
+  const events = await response.json();
+  const story = document.getElementById("story");
+  if (!events.length) {
+    story.replaceChildren(el("li", { style: "--c: var(--received)" },
+      el("span", { class: "why" }, "No history: this payment was created before the audit trail existed.")));
+    return;
+  }
+  story.replaceChildren(...events.map(e => {
+    const at = new Date(e.at);
+    const time = at.toLocaleTimeString(undefined, { hour12: false }) + "." + String(at.getMilliseconds()).padStart(3, "0");
+    const moved = e.from_status && e.from_status !== e.to_status;
+    const what = !e.from_status ? LABELS[e.to_status]
+      : moved ? `${LABELS[e.from_status]} → ${LABELS[e.to_status]}` : `Still ${LABELS[e.to_status].toLowerCase()}`;
+    return el("li", { style: `--c: var(--${e.to_status})` },
+      el("span", { class: "when" }, `${time} · attempt ${e.attempt}`),
+      el("span", { class: "what" }, what),
+      e.reason ? el("span", { class: "why" }, e.reason) : "",
+      el("span", { class: "who mono muted" }, e.actor));
+  }));
+}
+
+// --- reconciliation -----------------------------------------------------------
+
+async function runReconciliation() {
+  const box = document.getElementById("recon");
+  box.replaceChildren(el("div", { class: "empty" }, "Comparing records..."));
+  const response = await fetch("/reconciliation");
+  if (!response.ok) {
+    box.replaceChildren(el("div", { class: "error" }, (await response.json()).detail || "Reconciliation failed."));
+    return;
+  }
+  const report = await response.json();
+  const currencies = [...new Set([
+    ...Object.keys(report.settled_totals.ours), ...Object.keys(report.settled_totals.network)])].sort();
+  const side = (which, code) => {
+    const t = report.settled_totals[which][code] || { count: 0, amount: "0" };
+    return `${t.count} · ${money(t.amount, code)}`;
+  };
+  const breaks = report.breaks.length;
+  box.replaceChildren(
+    el("div", { class: `verdict ${report.balanced ? "ok" : "bad"}` },
+      report.balanced ? `Balanced: ${report.matched} payments match`
+        : `${breaks} break${breaks === 1 ? " needs" : "s need"} a person`),
+    el("table", { class: "totals" },
+      el("thead", {}, el("tr", {}, el("th", {}, "Settled"), el("th", {}, "Ours"), el("th", {}, "Network"))),
+      el("tbody", {}, ...currencies.map(code => el("tr", {},
+        el("td", {}, code), el("td", {}, side("ours", code)), el("td", {}, side("network", code)))))),
+    el("div", { class: "hint" },
+      `Resends the network absorbed: ${report.resends_absorbed}. Pending: ${
+        Object.entries(report.pending).map(([s, n]) => `${n} ${LABELS[s].toLowerCase()}`).join(", ") || "none"}.`),
+    ...report.breaks.map(b => el("div", { class: "break-item" },
+      el("div", {}, el("b", {}, b.explanation)),
+      el("div", { class: "mono muted" }, b.uetr),
+      el("div", { class: "muted" }, `ours: ${b.our_status || "no record"} · network: ${b.network_status || "no record"}`))));
+  refreshScoreboard();
+}
+
+document.getElementById("recon-run").addEventListener("click", runReconciliation);
+
 refresh();
+refreshScoreboard();
 setInterval(refresh, 1000);
+setInterval(refreshScoreboard, 3000);
 </script>
 </body>
 </html>

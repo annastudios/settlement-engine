@@ -47,15 +47,26 @@ Then open the **live dashboard** at http://localhost:8000/dashboard.
 
 `/dashboard` refreshes every second and shows:
 
-- How many payments are in each state
-- Each rail's actual speed next to its rate limit, with buttons to change
-  the limit
+- **The promises, checked live** at the top (`GET /scoreboard`):
+  - **Lost**: payments where we and the network disagree, from a live
+    reconciliation of today (payments still in flight here are left out,
+    since a worker or retry is about to settle the question)
+  - **Sent twice**: payments the network settled more than once, from the
+    network's own records, next to how many resends its dedupe absorbed
+  - **Stuck**: in-flight payments idle for 2+ minutes that nothing will
+    pick up (no live claim, not waiting in Redis)
+  - plus how many payments need a person (the repair queue)
+- How many payments are in each state, and payments settled per second
+  over the last minute
+- Each rail's actual speed next to its rate limit, how many payments are
+  waiting for a rate-limit slot, and buttons to change the limit
 - What Redis holds right now: waiting in the queue, being worked on (which
   worker holds which payment, and how long its lease has left), waiting to
   retry
 - The repair queue, with a **Resubmit** button per payment
 - Recent payments, each row flashing when its status changes; click one to
-  see its full history
+  open its life story (the audit trail) in a side panel
+- End-of-day reconciliation, run with one button
 
 Buttons send batches of random FPS/SEPA payments (about 1 in 10 FPS ones to
 a closed account) and switch the rail simulator between **Healthy**,
@@ -84,6 +95,7 @@ change, reset the dev database with `docker compose down -v`.
 | `GET /health` | Postgres and Redis status; **503** if either is down. |
 | `GET /dashboard` | The live dashboard page. |
 | `GET /stats` | Everything the dashboard shows, as JSON. |
+| `GET /scoreboard` | The promises checked live: lost, sent twice, stuck, needs a person. |
 | `POST /demo/payments?count=N` | Submit N random test payments (1-200). Dev/demo only. |
 | `PUT /demo/chaos` | Change the rail simulator's behaviour. Dev/demo only. |
 | `PUT /demo/rate-limits` | Change a rail's rate limit for all workers, e.g. `{"rail": "FPS", "per_second": 5}`. Dev/demo only. |
