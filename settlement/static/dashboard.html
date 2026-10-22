@@ -89,6 +89,13 @@
   ol.trail .who { font-size: 12px; }
   ol.trail .why { grid-column: 3; color: var(--muted); font-size: 12px; }
   @media (max-width: 600px) { ol.trail li { grid-template-columns: 1fr; } ol.trail .why { grid-column: 1; } }
+  .recon { margin-bottom: 12px; }
+  .recon-verdict { font-size: 18px; font-weight: 650; margin: 4px 0 10px; }
+  .recon-verdict.ok { color: var(--settled); }
+  .recon-verdict.bad { color: var(--rejected); }
+  .recon-figures { display: flex; gap: 18px; flex-wrap: wrap; margin-bottom: 10px; }
+  .recon-figures b { font-size: 20px; font-variant-numeric: tabular-nums; }
+  .recon-break { border-left: 3px solid var(--rejected); padding: 6px 10px; margin-top: 8px; }
   .empty { color: var(--muted); padding: 8px 0; }
   .error { color: var(--rejected); }
 </style>
@@ -135,6 +142,14 @@
       <h2>Repair queue</h2>
       <div id="repair"></div>
     </div>
+  </section>
+
+  <section class="panel recon">
+    <div class="history-head">
+      <h2>End-of-day reconciliation</h2>
+      <button class="small" id="recon-run">Reconcile today</button>
+    </div>
+    <div id="recon"><div class="hint">Compares our ledger with the payment network's own records, payment by payment, for today (UTC). Press the button to run it.</div></div>
   </section>
 
   <section class="panel history-panel" id="history-panel" hidden>
@@ -236,6 +251,46 @@ function renderQueue(queue) {
           el("td", {}, `${lease.seconds_left}s`)))))
     : el("div", { class: "empty" }, "No worker is holding a payment right now."));
 }
+
+async function runReconciliation() {
+  const box = document.getElementById("recon");
+  box.replaceChildren(el("div", { class: "hint" }, "Comparing records..."));
+  const response = await fetch("/reconciliation");
+  if (!response.ok) {
+    box.replaceChildren(el("div", { class: "error" }, (await response.json()).detail || "Reconciliation failed"));
+    return;
+  }
+  const report = await response.json();
+  const totals = currency => {
+    const ours = report.settled_totals.ours[currency] || { count: 0, amount: "0" };
+    const theirs = report.settled_totals.network[currency] || { count: 0, amount: "0" };
+    return el("tr", {},
+      el("td", {}, currency),
+      el("td", {}, `${ours.count} payments, ${ours.amount}`),
+      el("td", {}, `${theirs.count} payments, ${theirs.amount}`));
+  };
+  const currencies = [...new Set([
+    ...Object.keys(report.settled_totals.ours), ...Object.keys(report.settled_totals.network)])].sort();
+  const pending = Object.entries(report.pending).map(([s, n]) => `${n} ${LABELS[s] || s}`).join(", ") || "none";
+  box.replaceChildren(
+    el("div", { class: `recon-verdict ${report.balanced ? "ok" : "bad"}` },
+      report.balanced ? `Balanced: we and the network agree (${report.day})`
+        : report.breaks.length === 1 ? `Not balanced: 1 break needs a person (${report.day})`
+        : `Not balanced: ${report.breaks.length} breaks need a person (${report.day})`),
+    el("div", { class: "recon-figures" },
+      el("div", {}, el("b", {}, String(report.matched)), el("div", { class: "hint" }, "matched")),
+      el("div", {}, el("b", {}, String(report.breaks.length)), el("div", { class: "hint" }, "breaks")),
+      el("div", {}, el("b", {}, String(report.resends_absorbed)), el("div", { class: "hint" }, "resends the network absorbed")),
+      el("div", {}, el("div", { class: "hint" }, `pending: ${pending}`))),
+    el("table", {},
+      el("thead", {}, el("tr", {}, el("th", {}, "Settled"), el("th", {}, "Our ledger"), el("th", {}, "Payment network"))),
+      el("tbody", {}, ...currencies.map(totals))),
+    ...report.breaks.map(b => el("div", { class: "recon-break" },
+      el("div", {}, el("span", { class: "mono" }, b.uetr), " ", el("b", {}, b.explanation)),
+      el("div", { class: "hint" }, `ours: ${b.our_status || "no record"} ${b.our_amount || ""} · network: ${b.network_status || "no record"} ${b.network_amount || ""}`))));
+}
+
+document.getElementById("recon-run").addEventListener("click", runReconciliation);
 
 let selected = null;
 

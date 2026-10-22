@@ -9,9 +9,12 @@ and dedupes on the UETR: the same payment sent twice moves money once and
 gets the original answer back. Chaos settings make it misbehave on purpose
 (GET/PUT /chaos, or RAIL_* environment variables at startup).
 
-The ledger is in memory, so restarting the simulator clears it.
+The ledger is kept in memory. Set RAIL_LEDGER_FILE to also save each new
+payment to that file (one JSON line each) and load it again at startup, so
+the ledger survives restarts like a real network's would.
 """
 
+import json
 import os
 import random
 import threading
@@ -62,6 +65,27 @@ chaos = _chaos_from_env()
 # "record it" one step, so concurrent duplicates still settle once.
 _ledger: dict[str, dict] = {}
 _lock = threading.Lock()
+_LEDGER_FILE = os.getenv("RAIL_LEDGER_FILE")
+
+
+def _load_ledger() -> None:
+    if _LEDGER_FILE and os.path.exists(_LEDGER_FILE):
+        with open(_LEDGER_FILE, encoding="utf-8") as file:
+            for line in file:
+                entry = json.loads(line)
+                _ledger[entry["uetr"]] = entry
+
+
+def _save_entry(entry: dict) -> None:
+    """Append a newly processed payment to the ledger file, if there is one.
+    Only the first arrival is saved: later resends of the same payment
+    (received_count) are counted in memory only."""
+    if _LEDGER_FILE:
+        with open(_LEDGER_FILE, "a", encoding="utf-8") as file:
+            file.write(json.dumps(entry) + "\n")
+
+
+_load_ledger()
 
 
 def reset(new_chaos: Chaos | None = None) -> None:
@@ -84,7 +108,10 @@ def receive_payment(instruction: Instruction):
         if entry is None:
             entry = _decide(instruction)
             _ledger[instruction.uetr] = entry
-        entry["received_count"] += 1
+            entry["received_count"] += 1
+            _save_entry(entry)
+        else:
+            entry["received_count"] += 1
         answer = {"uetr": instruction.uetr, "status": entry["status"], "reason": entry["reason"]}
 
     if random.random() < chaos.drop_response_rate:
@@ -115,6 +142,14 @@ def get_payment(uetr: str):
     if entry is None:
         raise HTTPException(status_code=404, detail="rail has no record of this payment")
     return entry
+
+
+@app.get("/ledger")
+def ledger():
+    """Everything the rail has processed: its side of end-of-day
+    reconciliation (a real network sends this as a statement file)."""
+    with _lock:
+        return [dict(entry) for entry in _ledger.values()]
 
 
 @app.get("/chaos")

@@ -1,13 +1,15 @@
 import logging
 import uuid
 from contextlib import asynccontextmanager
+from datetime import UTC, date, datetime
 
+import httpx
 import redis
 from fastapi import Depends, FastAPI, HTTPException, Response
 from sqlalchemy import select, text
 from sqlalchemy.orm import Session
 
-from settlement import audit, connections, dashboard, work_queue
+from settlement import audit, connections, dashboard, reconciliation, work_queue
 from settlement.connections import get_session
 from settlement.models import Base, Payment
 from settlement.payments import UetrConflict, submit_payment
@@ -33,11 +35,13 @@ log = logging.getLogger("settlement.api")
 
 
 class _HideDashboardPolling(logging.Filter):
-    """The dashboard asks for /stats every second; keep that out of the access
-    log so the requests worth seeing aren't buried."""
+    """The dashboard asks for /stats (and an open payment's /history) every
+    second; keep that out of the access log so the requests worth seeing
+    aren't buried."""
 
     def filter(self, record: logging.LogRecord) -> bool:
-        return "GET /stats" not in record.getMessage()
+        message = record.getMessage()
+        return "GET /stats" not in message and not ("GET /payments/" in message and "/history" in message)
 
 
 logging.getLogger("uvicorn.access").addFilter(_HideDashboardPolling())
@@ -132,6 +136,18 @@ def resubmit_payment(uetr: uuid.UUID, session: Session = Depends(get_session)):
         )
     work_queue.enqueue(connections.redis_client, str(uetr))
     return payment
+
+
+@app.get("/reconciliation")
+def run_reconciliation(day: date | None = None, session: Session = Depends(get_session)):
+    """End-of-day reconciliation of our ledger against the payment network's
+    records for one UTC day (default today). balanced=false means breaks."""
+    try:
+        return reconciliation.run_for_day(session, day or datetime.now(UTC).date())
+    except httpx.HTTPError as exc:
+        raise HTTPException(
+            status_code=503, detail="can't reach the payment network for its records"
+        ) from exc
 
 
 @app.get("/payments/{uetr}/history", response_model=list[PaymentEventResponse])

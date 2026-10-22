@@ -49,6 +49,13 @@ def send_to_rail(payment: Payment) -> None:
         raise RailRejected(answer["reason"])
 
 
+def fetch_ledger() -> list[dict]:
+    """Everything the rail has processed, for reconciliation."""
+    response = _client.get("/ledger")
+    response.raise_for_status()
+    return response.json()
+
+
 def get_chaos() -> dict:
     """The rail simulator's current chaos settings (for the dashboard)."""
     response = _client.get("/chaos")

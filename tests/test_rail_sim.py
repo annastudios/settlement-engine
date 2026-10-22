@@ -1,6 +1,8 @@
 import uuid
 from concurrent.futures import ThreadPoolExecutor
 
+import rail_sim.main as rail_sim
+
 CLOSED_ACCOUNT = "GB56CLOS00000000000001"
 
 
@@ -73,6 +75,30 @@ def test_dropped_response_still_moves_the_money(rail):
     response = rail.post("/payments", json=body)
 
     assert response.status_code == 504
+    assert rail.get(f"/payments/{body['uetr']}").json()["status"] == "settled"
+
+
+def test_ledger_lists_everything_processed(rail):
+    settled, rejected = instruction(), instruction(creditor_iban=CLOSED_ACCOUNT)
+    rail.post("/payments", json=settled)
+    rail.post("/payments", json=rejected)
+
+    ledger = {entry["uetr"]: entry["status"] for entry in rail.get("/ledger").json()}
+
+    assert ledger == {settled["uetr"]: "settled", rejected["uetr"]: "rejected"}
+
+
+def test_ledger_file_survives_a_restart(rail, tmp_path, monkeypatch):
+    ledger_file = tmp_path / "ledger.jsonl"
+    monkeypatch.setattr(rail_sim, "_LEDGER_FILE", str(ledger_file))
+    body = instruction()
+    rail.post("/payments", json=body)
+    rail.post("/payments", json=body)  # a resend: not saved again
+
+    rail_sim.reset()  # the simulator forgets everything...
+    rail_sim._load_ledger()  # ...and reads its file back at startup
+
+    assert len(ledger_file.read_text().splitlines()) == 1
     assert rail.get(f"/payments/{body['uetr']}").json()["status"] == "settled"
 
 

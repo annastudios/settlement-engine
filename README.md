@@ -11,7 +11,8 @@ no payment was lost or processed twice.
 > sends are retried with backoff, payments that keep failing land in a
 > repair queue, payments left behind by crashed workers (or lost by Redis)
 > are recovered, each rail has a rate limit shared by all workers, and
-> every change is recorded in an append-only audit trail.
+> every change is recorded in an append-only audit trail, and an end-of-day
+> reconciliation compares our ledger with the network's records.
 
 ## Design in one line
 
@@ -77,6 +78,7 @@ change, reset the dev database with `docker compose down -v`.
 | `GET /payments/{uetr}` | Look up a payment, including `attempts` and `last_error`. |
 | `GET /payments/{uetr}/history` | The payment's audit trail: every change, who made it and why. |
 | `GET /repair-queue` | Payments that ran out of attempts, oldest first. |
+| `GET /reconciliation?day=YYYY-MM-DD` | End-of-day reconciliation against the network's records (default today, UTC). **503** if the network can't be reached. |
 | `POST /payments/{uetr}/resubmit` | Give a payment in the repair queue a fresh set of attempts. **409** if it isn't in the repair queue. |
 | `GET /health` | Postgres and Redis status; **503** if either is down. |
 | `GET /dashboard` | The live dashboard page. |
@@ -263,3 +265,39 @@ payment on the dashboard.
   still get distinct, ordered times.
 
 Payments created before the audit trail existed have no history.
+
+## End-of-day reconciliation
+
+Tests prove the code behaves; reconciliation checks what actually happened.
+It compares our ledger with the payment network's own records (its
+`GET /ledger`, standing in for the statement file a real network sends),
+payment by payment, for one UTC day:
+
+| Group | Meaning |
+|---|---|
+| **matched** | Same final status and amount on both sides |
+| **pending** | Not finished here and not seen by the network yet (e.g. in the repair queue). Not a problem. |
+| **break** | We and the network disagree. Needs a person. |
+
+The breaks it detects: the network settled a payment we don't have as
+settled (the money moved but we think it didn't), the network rejected one
+we have as settled, a final payment the network has no record of, a payment
+the network processed that we have no record of, and amount or currency
+mismatches. It also compares settled counts and totals per currency, and
+counts the resends the network's dedupe absorbed.
+
+Run it from the dashboard ("Reconcile today"), with `GET /reconciliation`
+(`?day=YYYY-MM-DD`), or as a command:
+
+```bash
+python -m settlement.reconciliation --day 2026-10-22
+```
+
+Live, a payment whose answers were all lost ended up in the repair queue
+although the network had settled it. Reconciliation flagged it ("the
+network settled it, but our record says otherwise"; GBP totals £560.00
+apart). Resubmitting it with the same UETR made the network confirm instead
+of paying again, and the next run balanced.
+
+The simulator keeps its ledger in memory; set `RAIL_LEDGER_FILE` (e.g.
+`rail_ledger.jsonl`) so it survives restarts, like a real network's would.
