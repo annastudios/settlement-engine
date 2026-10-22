@@ -11,8 +11,9 @@ no payment was lost or processed twice.
 > sends are retried with backoff, payments that keep failing land in a
 > repair queue, payments left behind by crashed workers (or lost by Redis)
 > are recovered, each rail has a rate limit shared by all workers, and
-> every change is recorded in an append-only audit trail, and an end-of-day
-> reconciliation compares our ledger with the network's records.
+> every change is recorded in an append-only audit trail, an end-of-day
+> reconciliation compares our ledger with the network's records, and
+> Prometheus + Grafana graph it all.
 
 ## Design in one line
 
@@ -301,3 +302,31 @@ of paying again, and the next run balanced.
 
 The simulator keeps its ledger in memory; set `RAIL_LEDGER_FILE` (e.g.
 `rail_ledger.jsonl`) so it survives restarts, like a real network's would.
+
+## Metrics (Prometheus + Grafana)
+
+The API serves Prometheus metrics at `/metrics`. Most come straight from
+the audit trail: it is append-only, so counting "entered settled", "entered
+retrying" and so on gives counters that only ever grow, which is what
+Prometheus needs, without adding anything to the workers.
+
+| Metric | What it is |
+|---|---|
+| `settlement_payments_entered_total{status, rail}` | Payments entering each status. `received` = submitted, `processing` = sent to the rail, `retrying` = failed send. |
+| `settlement_recoveries_total` | Times crash recovery acted on a payment |
+| `settlement_payments{status}` | Payments in each status right now |
+| `settlement_queue_payments{state}` | Redis queue right now: ready, in progress, waiting to retry |
+| `settlement_rate_limit_per_second{rail}` | Each rail's limit in force |
+
+Prometheus and Grafana run in Docker only when asked (about 75 MB of RAM
+together when idle), with a ready-made dashboard:
+
+```bash
+docker compose --profile metrics up -d   # then open http://127.0.0.1:3000
+```
+
+The dashboard shows settled, rejected, in-repair and queued totals, settled
+per second per rail against its rate limit, sends vs failed sends vs
+rejections vs payments giving up, the Redis queue, and payments in flight.
+An outage is visible at a glance: settled per second drops to zero, retries
+climb, and the in-repair tile turns purple.

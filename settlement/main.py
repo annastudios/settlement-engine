@@ -6,10 +6,11 @@ from datetime import UTC, date, datetime
 import httpx
 import redis
 from fastapi import Depends, FastAPI, HTTPException, Response
+from prometheus_client import CONTENT_TYPE_LATEST, generate_latest
 from sqlalchemy import select, text
 from sqlalchemy.orm import Session
 
-from settlement import audit, connections, dashboard, reconciliation, work_queue
+from settlement import audit, connections, dashboard, metrics, reconciliation, work_queue
 from settlement.connections import get_session
 from settlement.models import Base, Payment
 from settlement.payments import UetrConflict, submit_payment
@@ -36,12 +37,14 @@ log = logging.getLogger("settlement.api")
 
 class _HideDashboardPolling(logging.Filter):
     """The dashboard asks for /stats (and an open payment's /history) every
-    second; keep that out of the access log so the requests worth seeing
-    aren't buried."""
+    second, and Prometheus reads /metrics every few seconds; keep that out of
+    the access log so the requests worth seeing aren't buried."""
 
     def filter(self, record: logging.LogRecord) -> bool:
         message = record.getMessage()
-        return "GET /stats" not in message and not ("GET /payments/" in message and "/history" in message)
+        if "GET /stats" in message or "GET /metrics" in message:
+            return False
+        return not ("GET /payments/" in message and "/history" in message)
 
 
 logging.getLogger("uvicorn.access").addFilter(_HideDashboardPolling())
@@ -136,6 +139,12 @@ def resubmit_payment(uetr: uuid.UUID, session: Session = Depends(get_session)):
         )
     work_queue.enqueue(connections.redis_client, str(uetr))
     return payment
+
+
+@app.get("/metrics", include_in_schema=False)
+def prometheus_metrics():
+    """Numbers for Prometheus to collect (see settlement/metrics.py)."""
+    return Response(generate_latest(metrics.registry), media_type=CONTENT_TYPE_LATEST)
 
 
 @app.get("/reconciliation")

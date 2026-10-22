@@ -1,0 +1,11 @@
+# Prometheus reads the API's /metrics every 5 seconds. The API runs on this
+# machine outside Docker, so it is reached through host.docker.internal.
+global:
+  scrape_interval: 5s
+  evaluation_interval: 5s
+
+scrape_configs:
+  - job_name: settlement-engine
+    metrics_path: /metrics
+    static_configs:
+      - targets: ["host.docker.internal:8000"]
