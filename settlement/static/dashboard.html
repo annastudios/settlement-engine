@@ -580,7 +580,8 @@ const pill = status => el("span", { class: "pill", style: `--c: var(--${status})
 
 function money(amount, currency) {
   const symbol = { GBP: "£", EUR: "€" }[currency] || `${currency} `;
-  return symbol + Number(amount).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+  // Always UK-style grouping (£134,364.12), whatever the viewer's own locale is.
+  return symbol + Number(amount).toLocaleString("en-GB", { minimumFractionDigits: 2, maximumFractionDigits: 2 });
 }
 
 function ago(iso) {
